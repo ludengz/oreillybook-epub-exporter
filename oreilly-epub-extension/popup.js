@@ -83,22 +83,31 @@
     }
   });
 
-  document.getElementById('btn-download').addEventListener('click', () => {
+  const START_FAILURE_MESSAGES = {
+    content_script_unreachable: 'Could not reach the page. Refresh the O\'Reilly tab and try again.',
+    already_downloading: 'Another download is already in progress.',
+    no_tab: 'No active tab found.',
+  };
+
+  function requestDownload(startLabel) {
     showState('downloading');
     document.getElementById('progress-fill').style.width = '0%';
-    document.getElementById('progress-text').textContent = 'Starting...';
-    chrome.runtime.sendMessage({ action: 'startDownload', tabId: activeTabId });
-  });
+    document.getElementById('progress-text').textContent = startLabel;
+    chrome.runtime.sendMessage({ action: 'startDownload', tabId: activeTabId }, (response) => {
+      if (response && response.ok === false) {
+        showState('error');
+        document.getElementById('error-text').textContent =
+          START_FAILURE_MESSAGES[response.reason] || 'Could not start the download.';
+      }
+    });
+  }
+
+  document.getElementById('btn-download').addEventListener('click', () => requestDownload('Starting...'));
 
   document.getElementById('btn-cancel').addEventListener('click', () => {
     chrome.runtime.sendMessage({ action: 'cancelDownload', tabId: activeTabId });
     showState('ready');
   });
 
-  document.getElementById('btn-retry').addEventListener('click', () => {
-    showState('downloading');
-    document.getElementById('progress-fill').style.width = '0%';
-    document.getElementById('progress-text').textContent = 'Retrying...';
-    chrome.runtime.sendMessage({ action: 'startDownload', tabId: activeTabId });
-  });
+  document.getElementById('btn-retry').addEventListener('click', () => requestDownload('Retrying...'));
 })();

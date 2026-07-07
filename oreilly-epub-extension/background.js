@@ -70,9 +70,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         const targetTabId = message.tabId;
-        if (targetTabId) {
-          await setState({ downloadingTabId: targetTabId, status: 'downloading' });
-          chrome.tabs.sendMessage(targetTabId, { action: 'startDownload' });
+        if (!targetTabId) {
+          sendResponse({ ok: false, reason: 'no_tab' });
+          return;
+        }
+        await setState({ downloadingTabId: targetTabId, status: 'downloading' });
+        try {
+          await chrome.tabs.sendMessage(targetTabId, { action: 'startDownload' });
+        } catch (err) {
+          // Content script unreachable (e.g. extension reloaded, page not refreshed):
+          // roll back so the UI is not stuck in a downloading state forever
+          await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null });
+          sendResponse({ ok: false, reason: 'content_script_unreachable' });
+          return;
         }
         sendResponse({ ok: true });
         return;

@@ -27,6 +27,7 @@
     ],
     "js": [
       "lib/jszip.min.js",
+      "lib/path-utils.js",
       "lib/fetcher.js",
       "lib/epub-builder.js",
       "lib/eink-optimizer.js",

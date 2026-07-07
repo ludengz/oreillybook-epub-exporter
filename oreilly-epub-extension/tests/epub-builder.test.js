@@ -93,6 +93,18 @@ describe('EpubBuilder.generateOpf', function() {
     const opf = EpubBuilder.generateOpf(metadata, chapters, images, cssFiles, 'cover.jpg');
     assertContains(opf, 'properties="cover-image"');
   });
+  it('emits EPUB2 meta name="cover" pointing at the cover image manifest id', function() {
+    // Older e-ink readers (e.g. Boox) only honour the EPUB2-style cover meta
+    const opf = EpubBuilder.generateOpf(metadata, chapters, images, cssFiles, 'cover.jpg');
+    const m = opf.match(/<meta name="cover" content="([^"]+)"\/>/);
+    assert(m, 'OPF should contain <meta name="cover" .../> inside <metadata>');
+    assertContains(opf, `<item id="${m[1]}" href="Images/cover.jpg"`,
+      'cover meta must reference the manifest id of the cover image item');
+  });
+  it('omits the EPUB2 cover meta when there is no cover', function() {
+    const opf = EpubBuilder.generateOpf(metadata, chapters, images, cssFiles);
+    assert(!opf.includes('<meta name="cover"'), 'no cover meta expected without a cover');
+  });
 });
 
 describe('EpubBuilder.generateTocXhtml', function() {
