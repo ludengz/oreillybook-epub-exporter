@@ -2,7 +2,6 @@
   'use strict';
 
   let abortController = null;
-  let zipInstance = null;
 
   // Extract book title from document.title which has format "ChapterTitle | BookTitle"
   function extractBookTitle() {
@@ -57,32 +56,6 @@
       abortController.abort();
       abortController = null;
     }
-    zipInstance = null;
-  }
-
-  // Normalize a path for matching: resolve relative segments and strip leading slashes
-  function normalizePath(path) {
-    const parts = path.replace(/^\/+/, '').split('/');
-    const resolved = [];
-    for (const part of parts) {
-      if (part === '..') resolved.pop();
-      else if (part !== '.' && part !== '') resolved.push(part);
-    }
-    return resolved.join('/');
-  }
-
-  // Resolve an image src from chapter HTML against the chapter's original path in the EPUB
-  function resolveImagePath(imgSrc, chapterOriginalPath) {
-    // Strip query parameters and hash fragments for path resolution
-    const cleanSrc = Fetcher.stripQueryAndHash(imgSrc);
-    // Absolute URL — return as-is
-    if (cleanSrc.startsWith('http://') || cleanSrc.startsWith('https://')) {
-      return { resolved: cleanSrc, isAbsolute: true };
-    }
-    // Resolve relative to the chapter's directory in the EPUB structure
-    const chapterDir = chapterOriginalPath.substring(0, chapterOriginalPath.lastIndexOf('/'));
-    const combined = chapterDir + '/' + cleanSrc;
-    return { resolved: normalizePath(combined), isAbsolute: false };
   }
 
   // Fetch image via background service worker (CORS proxy)
@@ -113,10 +86,10 @@
     const isbn = Fetcher.extractIsbn(window.location.href);
     if (!isbn) return;
 
-    abortController = new AbortController();
-    const signal = abortController.signal;
-    zipInstance = new JSZip();
-    const zip = zipInstance;
+    const controller = new AbortController();
+    abortController = controller;
+    const signal = controller.signal;
+    const zip = new JSZip();
 
     try {
       // Fetch all pages of the file manifest (API is paginated, ~20 per page)
@@ -167,7 +140,6 @@
     } catch (err) {
       if (err.name === 'AbortError') {
         console.log('Download cancelled');
-        zipInstance = null;
         return;
       }
       console.error('Download failed:', err);
@@ -177,7 +149,10 @@
           ? 'Session expired. Please log in to O\'Reilly and try again.'
           : err.message,
       });
-      zipInstance = null;
+    } finally {
+      // Reset the reentry guard on every exit path (success, error, cancel).
+      // Guard against clobbering a newer download started after a cancel.
+      if (abortController === controller) abortController = null;
     }
   }
 
@@ -191,20 +166,7 @@
     zip.file('OEBPS/Styles/eink-override.css', await einkRes.text());
 
     // Track filenames to avoid collisions (different dirs, same filename)
-    const usedFilenames = new Set();
-    function uniqueFilename(basename) {
-      let name = basename;
-      let counter = 1;
-      while (usedFilenames.has(name)) {
-        const dot = basename.lastIndexOf('.');
-        const stem = dot > 0 ? basename.substring(0, dot) : basename;
-        const ext = dot > 0 ? basename.substring(dot) : '';
-        name = `${stem}_${counter}${ext}`;
-        counter++;
-      }
-      usedFilenames.add(name);
-      return name;
-    }
+    const uniqueFilename = PathUtils.createUniqueNamer();
 
     const cssFilenames = [];
     const cssImageMap = {}; // tracks CSS background images: original url -> zip filename
@@ -212,7 +174,9 @@
       try {
         const res = await Fetcher._fetchWithRetry(cssFile.url, { signal });
         let cssText = await res.text();
-        const filename = cssFile.path.split('/').pop();
+        // Unique name: same-basename CSS in different dirs must not overwrite
+        // each other in the ZIP or duplicate OPF manifest entries
+        const filename = uniqueFilename(cssFile.path.split('/').pop());
         cssFilenames.push(filename);
 
         // Extract and download background images referenced in CSS
@@ -221,7 +185,7 @@
           if (cssImageMap[cssImgUrl]) continue; // Already downloaded
           const cleanUrl = Fetcher.stripQueryAndHash(cssImgUrl);
           const cssDir = cssFile.path.substring(0, cssFile.path.lastIndexOf('/'));
-          const resolvedPath = normalizePath(cssDir + '/' + cleanUrl);
+          const resolvedPath = PathUtils.normalizePath(cssDir + '/' + cleanUrl);
           const imgName = uniqueFilename(Fetcher.stripQueryAndHash(cleanUrl.split('/').pop()));
           const apiUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/${Fetcher.stripQueryAndHash(resolvedPath)}`;
           try {
@@ -254,7 +218,7 @@
 
       const batch = imageFiles.slice(i, i + 2);
       await Promise.all(batch.map(async (imgFile) => {
-        const normalizedPath = normalizePath(imgFile.path);
+        const normalizedPath = PathUtils.normalizePath(imgFile.path);
         const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
         const imgFilename = uniqueFilename(rawFilename);
         try {
@@ -338,8 +302,8 @@
             continue;
           }
 
-          const { resolved, isAbsolute } = resolveImagePath(imgSrc, chapterOriginalPath);
-          const normalizedResolved = normalizePath(resolved);
+          const { resolved, isAbsolute } = PathUtils.resolveImagePath(imgSrc, chapterOriginalPath);
+          const normalizedResolved = PathUtils.normalizePath(resolved);
 
           // Strategy 1: Match against pre-downloaded manifest images
           if (manifestImageMap[normalizedResolved]) {
@@ -420,15 +384,22 @@
     };
 
     const allCssFiles = [...cssFilenames, 'eink-override.css'];
-    const allImageFiles = [...new Set(Object.values(imageMap))];
+    // Declare every image written into the ZIP: pre-downloaded manifest
+    // images, CSS background images, and chapter-referenced images. Anything
+    // in the ZIP but missing from the OPF manifest makes the EPUB invalid.
+    const allImageFiles = [...new Set([
+      ...Object.values(manifestImageMap),
+      ...Object.values(cssImageMap),
+      ...Object.values(imageMap),
+    ])];
 
-    const coverImage = allImageFiles.find(f => /cover/i.test(f));
+    const coverImage = EpubBuilder.findCoverImage(allImageFiles);
     if (coverImage) {
       zip.file('OEBPS/Text/cover.xhtml', EpubBuilder.generateCoverXhtml(bookTitle, coverImage));
       chapters.unshift({ filename: 'cover.xhtml', title: 'Cover' });
     }
 
-    zip.file('OEBPS/content.opf', EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage || null));
+    zip.file('OEBPS/content.opf', EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage));
     zip.file('OEBPS/toc.xhtml', EpubBuilder.generateTocXhtml(metadata.title, chapters));
     zip.file('OEBPS/toc.ncx', EpubBuilder.generateTocNcx(isbn, metadata.title, chapters));
 
@@ -443,7 +414,6 @@
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-    zipInstance = null;
     chrome.runtime.sendMessage({ action: 'downloadComplete' });
   }
 

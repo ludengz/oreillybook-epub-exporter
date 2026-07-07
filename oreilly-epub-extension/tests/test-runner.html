@@ -16,10 +16,18 @@
   <div id="output"></div>
   <div id="summary">Running...</div>
 
-  <!-- Load modules under test -->
+  <!-- Chrome API mock must load before content.js / background.js -->
+  <script src="chrome-mock.js"></script>
+
+  <!-- Load modules under test (path-utils must precede fetcher) -->
+  <script src="../lib/jszip.min.js"></script>
+  <script src="../lib/path-utils.js"></script>
   <script src="../lib/fetcher.js"></script>
   <script src="../lib/epub-builder.js"></script>
   <script src="../lib/eink-optimizer.js"></script>
+  <!-- content.js registers listener 0, background.js registers listener 1 -->
+  <script src="../content.js"></script>
+  <script src="../background.js"></script>
 
   <!-- Async test framework -->
   <script>
@@ -60,6 +68,10 @@
   <script src="epub-builder.test.js"></script>
   <script src="eink-optimizer.test.js"></script>
   <script src="fetcher.test.js"></script>
+  <script src="content-lifecycle.test.js"></script>
+  <script src="background-state.test.js"></script>
+  <script src="epub-compliance.test.js"></script>
+  <script src="path-utils.test.js"></script>
 
   <!-- Run all tests (async) -->
   <script>

@@ -31,27 +31,55 @@ const EpubBuilder = {
 </container>`;
   },
 
+  // Pick the cover image from a list of image filenames. Word-boundary
+  // matching avoids false positives like "recovery-diagram.png".
+  findCoverImage(filenames) {
+    const basename = (f) => f.split('/').pop();
+    const exact = filenames.find(f => /^cover\.[a-z0-9]+$/i.test(basename(f)));
+    if (exact) return exact;
+    return filenames.find(f => /(^|[_\-.])cover($|[_\-.])/i.test(basename(f))) || null;
+  },
+
   generateOpf(metadata, chapters, images, cssFiles, coverImageFilename) {
     const manifestItems = [];
     const spineItems = [];
+
+    // Manifest IDs must be unique within the OPF; sanitized filenames can
+    // collide (e.g. cover.png / cover.jpg both sanitize to "cover")
+    const usedIds = new Set(['nav', 'ncx', 'bookid']);
+    const uniqueId = (base) => {
+      let id = base;
+      let n = 2;
+      while (usedIds.has(id)) id = `${base}-${n++}`;
+      usedIds.add(id);
+      return id;
+    };
 
     manifestItems.push('    <item id="nav" href="toc.xhtml" media-type="application/xhtml+xml" properties="nav"/>');
     manifestItems.push('    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>');
 
     cssFiles.forEach(f => {
-      manifestItems.push(`    <item id="css-${this._sanitizeId(f)}" href="Styles/${f}" media-type="text/css"/>`);
+      const id = uniqueId(`css-${this._sanitizeId(f)}`);
+      manifestItems.push(`    <item id="${id}" href="Styles/${f}" media-type="text/css"/>`);
     });
 
     chapters.forEach(ch => {
-      const id = this._sanitizeId(ch.filename);
+      const id = uniqueId(this._sanitizeId(ch.filename));
       manifestItems.push(`    <item id="${id}" href="Text/${ch.filename}" media-type="application/xhtml+xml"/>`);
       spineItems.push(`    <itemref idref="${id}"/>`);
     });
 
+    let coverId = null;
     images.forEach(img => {
-      const props = (img === coverImageFilename) ? ' properties="cover-image"' : '';
-      manifestItems.push(`    <item id="img-${this._sanitizeId(img)}" href="Images/${img}" media-type="${this._mimeType(img)}"${props}/>`);
+      const id = uniqueId(`img-${this._sanitizeId(img)}`);
+      const isCover = (img === coverImageFilename);
+      if (isCover) coverId = id;
+      const props = isCover ? ' properties="cover-image"' : '';
+      manifestItems.push(`    <item id="${id}" href="Images/${img}" media-type="${this._mimeType(img)}"${props}/>`);
     });
+
+    // EPUB2-style cover meta for readers that ignore properties="cover-image"
+    const coverMeta = coverId ? `\n    <meta name="cover" content="${coverId}"/>` : '';
 
     const authors = metadata.authors.map(a => `    <dc:creator>${this._escapeXml(a)}</dc:creator>`).join('\n');
 
@@ -62,7 +90,7 @@ const EpubBuilder = {
     <dc:title>${this._escapeXml(metadata.title)}</dc:title>
     <dc:language>${metadata.language}</dc:language>
 ${authors}
-    <meta property="dcterms:modified">${metadata.modified}</meta>
+    <meta property="dcterms:modified">${metadata.modified}</meta>${coverMeta}
   </metadata>
   <manifest>
 ${manifestItems.join('\n')}

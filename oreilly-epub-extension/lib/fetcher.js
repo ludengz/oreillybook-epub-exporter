@@ -121,7 +121,8 @@ const Fetcher = {
   },
 
   // Strip query parameters and hash fragments from a path
+  // (delegates to PathUtils — single implementation; path-utils.js loads first)
   stripQueryAndHash(path) {
-    return path.split('?')[0].split('#')[0];
+    return PathUtils.stripQueryAndHash(path);
   },
 };
