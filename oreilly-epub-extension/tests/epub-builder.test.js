@@ -144,3 +144,100 @@ describe('EpubBuilder.generateCoverXhtml', function() {
     assertContains(cover, 'Test Book');
   });
 });
+
+describe('EpubBuilder.normalizeMetadata', function() {
+  it('keeps and canonicalizes valid BCP 47 language tags', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 'en-US' }).language, 'en-US');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 'EN-us' }).language, 'en-US');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: ['ja', 'en'] }).language, 'ja');
+  });
+  it('falls back to en for junk languages', function() {
+    // "english" is RFC 5646 well-formed (5-8-alpha subtag): Intl alone
+    // admits it, the 2-3-alpha primary-subtag requirement rejects it
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 'english' }).language, 'en');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 'en-a' }).language, 'en');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 'en-US-GB' }).language, 'en');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: [] }).language, 'en');
+    assertEqual(EpubBuilder.normalizeMetadata({ language: 42 }).language, 'en');
+  });
+  it('extracts ISO date prefixes without Date roundtrips', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2022-04-01T00:00:00Z' }).date, '2022-04-01');
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-05' }).date, '2023-05');
+  });
+  it('omits unparseable or out-of-range dates', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: 'May 2023' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-13' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-05-32' }).date, null);
+  });
+  it('omits calendar-impossible dates and the all-zero year', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '0000' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-02-30' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-02-29' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2024-02-29' }).date, '2024-02-29');
+  });
+  it('drops lone surrogates but keeps paired astral characters', function() {
+    // A lone high surrogate would reach the ZIP as CESU-8 bytes — invalid
+    // UTF-8 that strict OPF parsers (epubcheck) reject
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'a\uD83Db' }).description, 'ab');
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'a😀b' }).description, 'a😀b');
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'x\uFFFEy' }).description, 'xy');
+  });
+  it('converges publishers from arrays, bare strings, and name objects', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ publishers: ["O'Reilly Media, Inc."] }).publishers.join('|'), "O'Reilly Media, Inc.");
+    assertEqual(EpubBuilder.normalizeMetadata({ publishers: 'Acme' }).publishers.join('|'), 'Acme');
+    assertEqual(EpubBuilder.normalizeMetadata({ publishers: [{ name: 'A' }, 'B', null, 42] }).publishers.join('|'), 'A|B');
+  });
+  it('converges and dedupes subjects (topics_payload shape)', function() {
+    const subjects = EpubBuilder.normalizeMetadata({
+      subjects: [{ uuid: 'x', slug: 'python', name: 'Python' }, 'Python', { name: 'Java' }],
+    }).subjects;
+    assertEqual(subjects.join('|'), 'Python|Java');
+  });
+  it('flattens HTML descriptions with block boundaries as spaces', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ description: '<p>A</p><p>B</p>' }).description, 'A B');
+    assertEqual(EpubBuilder.normalizeMetadata({ description: '<span><div><p>X &amp; Y</p></div></span>' }).description, 'X & Y');
+  });
+  it('strips XML-illegal code points from text fields', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'a\u0008b' }).description, 'ab');
+  });
+  it('never throws on junk input', function() {
+    assertEqual(EpubBuilder.normalizeMetadata(null).language, 'en');
+    const junk = EpubBuilder.normalizeMetadata({ language: 5, publishers: 7, subjects: {}, issued: 9, description: 4 });
+    assertEqual(junk.publishers.length, 0);
+    assertEqual(junk.date, null);
+  });
+});
+
+describe('EpubBuilder.generateOpf optional metadata', function() {
+  const minimal = {
+    title: 'Test Book', authors: ['A'], isbn: '9781234567890',
+    language: 'en', modified: '2024-01-01T00:00:00Z',
+  };
+  const chapters = [{ filename: 'chapter_01.xhtml', title: 'C1' }];
+
+  it('emits no optional elements for minimal metadata', function() {
+    const opf = EpubBuilder.generateOpf(minimal, chapters, [], []);
+    assert(!opf.includes('<dc:publisher'), 'no dc:publisher expected');
+    assert(!opf.includes('<dc:subject'), 'no dc:subject expected');
+    assert(!opf.includes('<dc:description'), 'no dc:description expected');
+    assert(!opf.includes('<dc:date'), 'no dc:date expected');
+  });
+  it('emits escaped optional elements when present', function() {
+    const rich = Object.assign({}, minimal, {
+      publishers: ["O'Reilly <Media> & Co"],
+      subjects: ['Python', 'C & D'],
+      date: '2022-04-01',
+      description: 'Fast & <deep>',
+    });
+    const opf = EpubBuilder.generateOpf(rich, chapters, [], []);
+    assertContains(opf, "<dc:publisher>O'Reilly &lt;Media&gt; &amp; Co</dc:publisher>");
+    assertContains(opf, '<dc:subject>Python</dc:subject>');
+    assertContains(opf, '<dc:subject>C &amp; D</dc:subject>');
+    assertContains(opf, '<dc:date>2022-04-01</dc:date>');
+    assertContains(opf, '<dc:description>Fast &amp; &lt;deep&gt;</dc:description>');
+  });
+  it('escapes the API-sourced dc:language value', function() {
+    const opf = EpubBuilder.generateOpf(Object.assign({}, minimal, { language: 'pt-BR' }), chapters, [], []);
+    assertContains(opf, '<dc:language>pt-BR</dc:language>');
+  });
+});

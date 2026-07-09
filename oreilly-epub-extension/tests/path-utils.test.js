@@ -59,6 +59,95 @@ describe('PathUtils.createUniqueNamer', function() {
   });
 });
 
+describe('PathUtils.isAllowedImageUrl', function() {
+  it('accepts the O\'Reilly hosts over https', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('https://learning.oreilly.com/library/cover/x/'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://cdn.oreillystatic.com/a.png'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://oreillystatic.com/a.png'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://www.safaribooksonline.com/a.jpg'), true);
+  });
+  it('rejects suffix-spoofing and lookalike hosts', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('https://oreillystatic.com.evil.example/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('https://xlearning.oreilly.com/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('https://notoreillystatic.com/a.png'), false);
+  });
+  it('rejects non-https schemes and junk', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('http://learning.oreilly.com/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('not a url'), false);
+    assertEqual(PathUtils.isAllowedImageUrl(undefined), false);
+    assertEqual(PathUtils.isAllowedImageUrl(null), false);
+  });
+  it('stays in sync with manifest.json host_permissions', async function() {
+    // The allowlist deliberately duplicates host_permissions (the SW cannot
+    // read getManifest in tests) — this test fails if the two drift apart
+    const manifest = await (await fetch('../manifest.json')).json();
+    const patterns = manifest.host_permissions || [];
+    assert(patterns.length >= 3, 'expected host_permissions in manifest.json');
+    for (const pattern of patterns) {
+      const host = pattern.replace(/^https:\/\//, '').replace(/\/.*$/, '');
+      const sample = 'https://' + host.replace(/^\*\./, 'sub.') + '/x.png';
+      assertEqual(PathUtils.isAllowedImageUrl(sample), true,
+        `host_permissions entry ${pattern} must be accepted by isAllowedImageUrl`);
+      if (host.startsWith('*.')) {
+        const bare = 'https://' + host.slice(2) + '/x.png';
+        assertEqual(PathUtils.isAllowedImageUrl(bare), true,
+          `bare domain of ${pattern} must be accepted (Chrome *. patterns match the host itself)`);
+      }
+    }
+  });
+});
+
+describe('PathUtils.sanitizeFilename', function() {
+  const FB = 'book-9781234567890';
+  it('preserves CJK titles unchanged', function() {
+    assertEqual(PathUtils.sanitizeFilename('深入理解计算机系统', FB), '深入理解计算机系统');
+  });
+  it('preserves accented characters and case', function() {
+    assertEqual(PathUtils.sanitizeFilename('Café Sécurité', FB), 'Café Sécurité');
+  });
+  it('keeps ASCII titles readable instead of kebab-lowercase', function() {
+    assertEqual(
+      PathUtils.sanitizeFilename('Designing Data-Intensive Applications', FB),
+      'Designing Data-Intensive Applications'
+    );
+  });
+  it('replaces filesystem-illegal characters with spaces and collapses', function() {
+    assertEqual(PathUtils.sanitizeFilename('C++: Design/Use?', FB), 'C++ Design Use');
+  });
+  it('falls back for punctuation-only titles', function() {
+    assertEqual(PathUtils.sanitizeFilename('???', FB), FB);
+  });
+  it('falls back for empty and whitespace-only titles', function() {
+    assertEqual(PathUtils.sanitizeFilename('', FB), FB);
+    assertEqual(PathUtils.sanitizeFilename('   ', FB), FB);
+    assertEqual(PathUtils.sanitizeFilename(null, FB), FB);
+  });
+  it('falls back for Windows reserved device names', function() {
+    assertEqual(PathUtils.sanitizeFilename('con', FB), FB);
+    assertEqual(PathUtils.sanitizeFilename('COM7', FB), FB);
+    assertEqual(PathUtils.sanitizeFilename('LPT1', FB), FB);
+  });
+  it('trims leading and trailing dots and spaces', function() {
+    assertEqual(PathUtils.sanitizeFilename('Title...', FB), 'Title');
+    assertEqual(PathUtils.sanitizeFilename('.hidden', FB), 'hidden');
+  });
+  it('strips zero-width, bidi-override, and control characters', function() {
+    assertEqual(PathUtils.sanitizeFilename('A\u200BB\u202EC\u0007D', FB), 'A B C D');
+  });
+  it('truncates byte-aware without splitting a code point', function() {
+    // 100 CJK chars = 300 UTF-8 bytes; cap is 200 bytes = 66 chars (198 bytes)
+    const long = '书'.repeat(100);
+    const out = PathUtils.sanitizeFilename(long, FB);
+    assertEqual(out, '书'.repeat(66));
+  });
+  it('re-trims trailing dots or spaces exposed by truncation', function() {
+    // 66 CJK chars (198 bytes) + '. ' — the cap cuts inside the padding
+    const tricky = '书'.repeat(66) + '.  X';
+    const out = PathUtils.sanitizeFilename(tricky, FB);
+    assertEqual(out, '书'.repeat(66));
+  });
+});
+
 describe('PathUtils.stripQueryAndHash', function() {
   it('strips query and hash', function() {
     assertEqual(PathUtils.stripQueryAndHash('img.png?w=100#x'), 'img.png');

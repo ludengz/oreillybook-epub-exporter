@@ -1,6 +1,22 @@
 // Service Worker: message relay, badge, state, progress broadcast
 // Uses chrome.storage.session to survive SW termination (MV3 lifecycle)
 
+// Shared pure helpers (PathUtils.isAllowedImageUrl). In the real MV3 service
+// worker importScripts loads them; in the test-runner page background.js is
+// loaded via a script tag where importScripts does not exist but PathUtils
+// is already a global. Do not derive the allowlist from
+// chrome.runtime.getManifest() — the test chrome mock does not stub it.
+if (typeof importScripts === 'function') {
+  try {
+    importScripts('lib/path-utils.js');
+  } catch (e) {
+    // Fail closed but keep the SW alive: fetchImage's allowlist check will
+    // throw on the missing PathUtils and reject requests, while the message
+    // relay and state handlers keep working.
+    console.error('Failed to load lib/path-utils.js in the service worker:', e);
+  }
+}
+
 const DEFAULT_STATE = {
   status: 'idle', // idle | downloading | complete | error
   progress: null,
@@ -167,8 +183,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'fetchImage': {
         // CORS proxy: fetch image from SW context (bypasses content script CORS)
         try {
+          // Defense-in-depth: the privileged, credentialed fetch validates
+          // the URL itself instead of trusting the caller-side gate alone.
+          // Off-O'Reilly chapter images are deliberately rejected too.
+          if (!PathUtils.isAllowedImageUrl(message.url)) {
+            sendResponse({ ok: false, error: 'URL not allowed' });
+            return;
+          }
           const response = await fetch(message.url, { credentials: 'include' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          // Redirects can land outside the allowlist; re-validate the final
+          // URL so an allowed host cannot 302 the credentialed fetch away
+          if (response.url && !PathUtils.isAllowedImageUrl(response.url)) {
+            sendResponse({ ok: false, error: 'Redirected outside allowlist' });
+            return;
+          }
+          const contentType = response.headers.get('content-type') || null;
           const buffer = await response.arrayBuffer();
           // Convert to base64 for message passing (ArrayBuffer can't be sent)
           const bytes = new Uint8Array(buffer);
@@ -176,7 +206,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           for (let i = 0; i < bytes.length; i++) {
             binary += String.fromCharCode(bytes[i]);
           }
-          sendResponse({ ok: true, data: btoa(binary) });
+          sendResponse({ ok: true, data: btoa(binary), contentType });
         } catch (err) {
           sendResponse({ ok: false, error: err.message });
         }

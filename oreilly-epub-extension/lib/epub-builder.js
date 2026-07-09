@@ -7,6 +7,123 @@ const EpubBuilder = {
       .replace(/"/g, '&quot;');
   },
 
+  // XML 1.0 forbids these code points entirely — escaping cannot save them.
+  // Strip from any API-sourced text before it reaches the OPF templates.
+  // Iterates by code point so paired surrogates (astral chars like emoji)
+  // survive, while LONE surrogates — which JSZip's browser path serializes
+  // as invalid UTF-8 (CESU-8 bytes), breaking strict OPF parsers — are
+  // dropped, along with C0 controls and the U+FFFE/U+FFFF noncharacters.
+  _stripIllegalXmlChars(str) {
+    let out = '';
+    for (const ch of str) {
+      const cp = ch.codePointAt(0);
+      if (cp <= 0x0008 || cp === 0x000B || cp === 0x000C || (cp >= 0x000E && cp <= 0x001F)) continue;
+      if (cp >= 0xD800 && cp <= 0xDFFF) continue;
+      if (cp === 0xFFFE || cp === 0xFFFF) continue;
+      out += ch;
+    }
+    return out;
+  },
+
+  // Converge one untrusted value into a trimmed, XML-safe string, or null
+  _cleanString(value) {
+    if (typeof value !== 'string') return null;
+    const s = this._stripIllegalXmlChars(value).trim();
+    return s || null;
+  },
+
+  // Converge a list-valued API field (bare string, or an array of strings /
+  // {name} objects) into a deduped array of clean strings
+  _cleanStringList(value) {
+    const items = Array.isArray(value) ? value : (value != null ? [value] : []);
+    const out = [];
+    for (const item of items) {
+      let raw = null;
+      if (typeof item === 'string') raw = item;
+      else if (item && typeof item === 'object' && typeof item.name === 'string') raw = item.name;
+      const s = raw !== null ? this._cleanString(raw) : null;
+      if (s && !out.includes(s)) out.push(s);
+    }
+    return out;
+  },
+
+  // Validate and canonicalize a BCP 47 tag. Intl alone admits well-formed
+  // 5-8-alpha names like "english", so additionally require a 2-3-alpha
+  // primary subtag (ISO 639-1/2). Returns the canonicalized tag or null.
+  _normalizeLanguage(value) {
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    let canonical;
+    try {
+      canonical = Intl.getCanonicalLocales(raw.trim())[0];
+    } catch (e) {
+      return null;
+    }
+    if (!canonical || !/^[a-zA-Z]{2,3}(-|$)/.test(canonical)) return null;
+    return canonical;
+  },
+
+  // Extract an ISO date prefix (YYYY[-MM[-DD]]) as a string — never through
+  // Date, which drifts across timezones and parses junk like "May 2023".
+  // Calendar-checks the components: XML Schema's date types reject the
+  // all-zero year, and "2023-02-30" would draw an epubcheck complaint.
+  _normalizeDate(value) {
+    if (typeof value !== 'string') return null;
+    const m = value.trim().match(/^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?(?=$|[T ])/);
+    if (!m) return null;
+    const [, y, mo, d] = m;
+    if (y === '0000') return null;
+    if (mo !== undefined && (mo < '01' || mo > '12')) return null;
+    if (d !== undefined) {
+      const year = Number(y);
+      const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+      const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      const day = Number(d);
+      if (day < 1 || day > daysInMonth[Number(mo) - 1]) return null;
+    }
+    return y + (mo ? `-${mo}` : '') + (d ? `-${d}` : '');
+  },
+
+  // Flatten an HTML description into plain text via DOM (never regex tag
+  // surgery). Block boundaries become spaces — bare textContent would glue
+  // "<p>A</p><p>B</p>" into "AB".
+  _htmlToPlainText(html) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const BLOCK = /^(p|div|br|li|ul|ol|h[1-6]|tr|td|th|table|blockquote|section|article)$/i;
+    let out = '';
+    const walk = (node) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) out += child.textContent;
+        else if (child.nodeType === Node.ELEMENT_NODE) {
+          const isBlock = BLOCK.test(child.tagName);
+          if (isBlock) out += ' ';
+          walk(child);
+          if (isBlock) out += ' ';
+        }
+      }
+    };
+    walk(doc.body);
+    return out.replace(/\s+/g, ' ').trim();
+  },
+
+  // Converge an untrusted metadata object (the content script's rich fetch
+  // result) into clean optional OPF fields. Every value is type-guarded;
+  // absent or invalid fields come back as null / empty arrays.
+  normalizeMetadata(raw) {
+    const book = (raw && typeof raw === 'object') ? raw : {};
+    const description = typeof book.description === 'string'
+      ? this._cleanString(this._htmlToPlainText(book.description))
+      : null;
+    return {
+      language: this._normalizeLanguage(book.language) || 'en',
+      publishers: this._cleanStringList(book.publishers),
+      subjects: this._cleanStringList(book.subjects),
+      date: this._normalizeDate(book.issued),
+      description,
+      coverUrl: this._cleanString(book.coverUrl),
+    };
+  },
+
   _mimeType(filename) {
     const ext = filename.split('.').pop().toLowerCase();
     const types = {
@@ -83,13 +200,24 @@ const EpubBuilder = {
 
     const authors = metadata.authors.map(a => `    <dc:creator>${this._escapeXml(a)}</dc:creator>`).join('\n');
 
+    // Optional dc elements: emitted only when the (already normalized)
+    // metadata carries them — never as empty elements
+    const optional = [];
+    (metadata.publishers || []).forEach(p =>
+      optional.push(`    <dc:publisher>${this._escapeXml(p)}</dc:publisher>`));
+    (metadata.subjects || []).forEach(s =>
+      optional.push(`    <dc:subject>${this._escapeXml(s)}</dc:subject>`));
+    if (metadata.description) optional.push(`    <dc:description>${this._escapeXml(metadata.description)}</dc:description>`);
+    if (metadata.date) optional.push(`    <dc:date>${metadata.date}</dc:date>`);
+    const optionalMeta = optional.length ? '\n' + optional.join('\n') : '';
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <metadata>
     <dc:identifier id="bookid">urn:isbn:${metadata.isbn}</dc:identifier>
     <dc:title>${this._escapeXml(metadata.title)}</dc:title>
-    <dc:language>${metadata.language}</dc:language>
-${authors}
+    <dc:language>${this._escapeXml(metadata.language)}</dc:language>
+${authors}${optionalMeta}
     <meta property="dcterms:modified">${metadata.modified}</meta>${coverMeta}
   </metadata>
   <manifest>

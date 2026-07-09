@@ -11,6 +11,7 @@
   const sentMessages = [];
   let storageStore = {};
   let tabsSendMessageImpl = async () => undefined;
+  let messageResponders = {};
 
   window.chrome = Object.assign(window.chrome || {}, {
     runtime: {
@@ -20,7 +21,13 @@
       },
       sendMessage(message, callback) {
         sentMessages.push(message);
-        if (callback) callback({ ok: true });
+        // Action-routed responders let tests serve real payloads (e.g. a
+        // base64 image for fetchImage); default remains a bare { ok: true }
+        const responder = messageResponders[message.action];
+        if (callback) {
+          if (responder) Promise.resolve(responder(message)).then(callback);
+          else callback({ ok: true });
+        }
         return Promise.resolve();
       },
       getURL(path) { return path; },
@@ -54,6 +61,8 @@
       });
     },
     clearMessages() { sentMessages.length = 0; },
+    setMessageResponder(action, fn) { messageResponders[action] = fn; },
+    clearResponders() { messageResponders = {}; },
     resetStorage(initial = {}) { storageStore = initial; },
     getStorage() { return storageStore; },
     setTabsSendMessage(fn) { tabsSendMessageImpl = fn; },
