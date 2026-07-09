@@ -405,10 +405,10 @@
 
     const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
     const url = URL.createObjectURL(blob);
-    const sanitizedTitle = bookTitle.replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase();
+    const filenameStem = PathUtils.sanitizeFilename(bookTitle, `book-${isbn}`);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${sanitizedTitle}.epub`;
+    a.download = `${filenameStem}.epub`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
