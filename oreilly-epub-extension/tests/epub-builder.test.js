@@ -169,6 +169,19 @@ describe('EpubBuilder.normalizeMetadata', function() {
     assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-13' }).date, null);
     assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-05-32' }).date, null);
   });
+  it('omits calendar-impossible dates and the all-zero year', function() {
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '0000' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-02-30' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2023-02-29' }).date, null);
+    assertEqual(EpubBuilder.normalizeMetadata({ issued: '2024-02-29' }).date, '2024-02-29');
+  });
+  it('drops lone surrogates but keeps paired astral characters', function() {
+    // A lone high surrogate would reach the ZIP as CESU-8 bytes — invalid
+    // UTF-8 that strict OPF parsers (epubcheck) reject
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'a\uD83Db' }).description, 'ab');
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'a😀b' }).description, 'a😀b');
+    assertEqual(EpubBuilder.normalizeMetadata({ description: 'x\uFFFEy' }).description, 'xy');
+  });
   it('converges publishers from arrays, bare strings, and name objects', function() {
     assertEqual(EpubBuilder.normalizeMetadata({ publishers: ["O'Reilly Media, Inc."] }).publishers.join('|'), "O'Reilly Media, Inc.");
     assertEqual(EpubBuilder.normalizeMetadata({ publishers: 'Acme' }).publishers.join('|'), 'Acme');

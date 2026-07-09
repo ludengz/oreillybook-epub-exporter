@@ -84,11 +84,28 @@ describe('background.js fetchImage proxy', function() {
         'https://evil.example/x.jpg',
         'https://oreillystatic.com.evil.example/x.jpg',
         'http://learning.oreilly.com/x.jpg',
+        undefined,
       ]) {
         const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'fetchImage', url });
         assert(response && response.ok === false, `expected rejection for ${url}`);
       }
       assertEqual(fetched, false, 'handler must not fetch disallowed URLs');
+    });
+  });
+
+  it('rejects responses that redirected outside the allowlist', async function() {
+    const bytes = new Uint8Array([1, 2, 3]);
+    await withPatchedFetch(async () => ({
+      ok: true,
+      url: 'https://evil.example/final.jpg',
+      headers: new Headers({ 'content-type': 'image/jpeg' }),
+      arrayBuffer: async () => bytes.buffer,
+    }), async () => {
+      const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, {
+        action: 'fetchImage', url: 'https://learning.oreilly.com/library/cover/123/',
+      });
+      assert(response && response.ok === false,
+        'a credentialed fetch that 302s off-allowlist must be rejected');
     });
   });
 });

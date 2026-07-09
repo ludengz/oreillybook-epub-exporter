@@ -189,7 +189,7 @@ describe('content.js EPUB compliance (integration)', function() {
 // Each scenario runs a full mocked download with its own ISBN (the metadata
 // cache in content.js persists for the whole test-runner page session).
 
-function coverScenarioFetchMock(origFetch, { isbn, coverUrl, includeCoverImage }) {
+function coverScenarioFetchMock(origFetch, { isbn, coverUrl, includeCoverImage, failCoverImage }) {
   return async (url) => {
     url = String(url);
     if (url.startsWith('blob:')) return origFetch(url);
@@ -205,13 +205,16 @@ function coverScenarioFetchMock(origFetch, { isbn, coverUrl, includeCoverImage }
         { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
         { full_path: 'images/fig1.png', kind: 'image', media_type: 'image/png' },
       ];
-      if (includeCoverImage) {
+      if (includeCoverImage || failCoverImage) {
         files.push({ full_path: 'images/cover.jpg', kind: 'image', media_type: 'image/jpeg' });
       }
       return mockResponse({ jsonBody: { results: files, next: null } });
     }
     if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body { color: #000; }' });
     if (url.includes('/files/ch1.xhtml')) return mockResponse({ textBody: COMPLIANCE_CHAPTER });
+    if (failCoverImage && url.includes('images/cover.jpg')) {
+      return mockResponse({ ok: false, status: 404 });
+    }
     if (/\.png$/.test(url)) return mockResponse({ buffer: TINY_PNG });
     if (/\.jpe?g$/.test(url)) return mockResponse({ buffer: TINY_JPG });
     return mockResponse({ ok: false, status: 404 });
@@ -323,6 +326,116 @@ describe('content.js API cover fallback (integration)', function() {
       'an unidentifiable media type must never reach the manifest');
     assert(!zipPaths.some(p => /OEBPS\/Images\/cover\./.test(p)), 'no cover file expected in the ZIP');
     assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('dedupes the fallback filename against a failed manifest cover.jpg', async function() {
+    // The namer reserves names at claim time, before the fetch runs — a
+    // manifest cover.jpg whose download fails still occupies "cover.jpg",
+    // so the API fallback must land on cover_1.jpg consistently everywhere.
+    const isbn = '9781515151515';
+    const origRetry = Fetcher._fetchWithRetry;
+    // 404s retry for ~13s by default; not what this test is about
+    Fetcher._fetchWithRetry = function(url, opts) {
+      return origRetry.call(Fetcher, url, Object.assign({}, opts, { maxRetries: 0 }));
+    };
+    try {
+      const { opf, zip, zipPaths, fetchImageCalls } = await buildEpubWith({
+        isbn,
+        fetchMock: (orig) => coverScenarioFetchMock(orig, {
+          isbn, coverUrl: `https://learning.oreilly.com/library/cover/${isbn}/`, failCoverImage: true,
+        }),
+        fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
+      });
+      assertEqual(fetchImageCalls, 1, 'heuristic misses (cover.jpg never downloaded) → fallback runs');
+      assert(zipPaths.includes('OEBPS/Images/cover_1.jpg'),
+        `fallback must dedupe to cover_1.jpg; ZIP has: ${zipPaths.join(', ')}`);
+      assert(!zipPaths.includes('OEBPS/Images/cover.jpg'), 'the failed manifest name must stay unwritten');
+      assertContains(opf, 'href="Images/cover_1.jpg" media-type="image/jpeg" properties="cover-image"');
+      const coverXhtml = await zip.file('OEBPS/Text/cover.xhtml').async('string');
+      assertContains(coverXhtml, '../Images/cover_1.jpg', 'cover.xhtml must reference the deduped name');
+      assertNoImageOrphans(opf, zipPaths);
+    } finally {
+      Fetcher._fetchWithRetry = origRetry;
+    }
+  });
+
+  it('normalizes a relative cover_url and strips Content-Type parameters', async function() {
+    const isbn = '9781616161616';
+    const { opf, zipPaths } = await buildEpubWith({
+      isbn,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, {
+        isbn, coverUrl: `/library/cover/${isbn}/`, includeCoverImage: false,
+      }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg; charset=binary' }),
+    });
+    assert(zipPaths.includes('OEBPS/Images/cover.jpg'),
+      'relative cover_url must resolve against learning.oreilly.com; CT parameters must strip');
+    assertContains(opf, 'properties="cover-image"');
+    assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('falls back to the URL extension for a non-committal Content-Type', async function() {
+    const isbn = '9781717171717';
+    const { opf, zipPaths } = await buildEpubWith({
+      isbn,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, {
+        isbn, coverUrl: `https://learning.oreilly.com/covers/${isbn}.jpg`, includeCoverImage: false,
+      }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'application/octet-stream' }),
+    });
+    assert(zipPaths.includes('OEBPS/Images/cover.jpg'),
+      'octet-stream is non-committal — the valid .jpg URL extension must win');
+    assertContains(opf, 'href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"');
+    assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('skips the cover for a definite non-image Content-Type despite a .jpg URL', async function() {
+    const isbn = '9781818181818';
+    const { opf, zipPaths } = await buildEpubWith({
+      isbn,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, {
+        isbn, coverUrl: `https://learning.oreilly.com/covers/${isbn}.jpg`, includeCoverImage: false,
+      }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'text/html' }),
+    });
+    assert(!opf.includes('properties="cover-image"'),
+      'HTML bytes must never be packaged under an image extension');
+    assert(!zipPaths.some(p => /OEBPS\/Images\/cover\./.test(p)), 'no cover file expected');
+    assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('never completes a download cancelled during the cover fetch', async function() {
+    const isbn = '9781919191919';
+    let releaseCover;
+    const coverGate = new Promise(resolve => { releaseCover = resolve; });
+    const origFetch = window.fetch;
+    const origExtract = Fetcher.extractIsbn;
+    const origClick = HTMLAnchorElement.prototype.click;
+    try {
+      Fetcher.extractIsbn = () => isbn;
+      window.fetch = coverScenarioFetchMock(origFetch, {
+        isbn, coverUrl: `https://learning.oreilly.com/library/cover/${isbn}/`, includeCoverImage: false,
+      });
+      HTMLAnchorElement.prototype.click = function() {};
+      ChromeMock.setMessageResponder('fetchImage', () =>
+        coverGate.then(() => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' })));
+
+      await ChromeMock.dispatchTo(0, { action: 'cancelDownload' });
+      ChromeMock.clearMessages();
+      ChromeMock.dispatchTo(0, { action: 'startDownload' });
+      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'fetchImage'),
+        { timeout: 15000, label: 'cover fetch to start' });
+      await ChromeMock.dispatchTo(0, { action: 'cancelDownload' });
+      releaseCover();
+      await new Promise(r => setTimeout(r, 400));
+      assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        'a download cancelled during the cover fetch must not complete');
+    } finally {
+      ChromeMock.clearResponders();
+      window.fetch = origFetch;
+      Fetcher.extractIsbn = origExtract;
+      HTMLAnchorElement.prototype.click = origClick;
+    }
   });
 });
 

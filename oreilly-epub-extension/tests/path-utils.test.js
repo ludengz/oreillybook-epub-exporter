@@ -74,6 +74,26 @@ describe('PathUtils.isAllowedImageUrl', function() {
   it('rejects non-https schemes and junk', function() {
     assertEqual(PathUtils.isAllowedImageUrl('http://learning.oreilly.com/a.png'), false);
     assertEqual(PathUtils.isAllowedImageUrl('not a url'), false);
+    assertEqual(PathUtils.isAllowedImageUrl(undefined), false);
+    assertEqual(PathUtils.isAllowedImageUrl(null), false);
+  });
+  it('stays in sync with manifest.json host_permissions', async function() {
+    // The allowlist deliberately duplicates host_permissions (the SW cannot
+    // read getManifest in tests) — this test fails if the two drift apart
+    const manifest = await (await fetch('../manifest.json')).json();
+    const patterns = manifest.host_permissions || [];
+    assert(patterns.length >= 3, 'expected host_permissions in manifest.json');
+    for (const pattern of patterns) {
+      const host = pattern.replace(/^https:\/\//, '').replace(/\/.*$/, '');
+      const sample = 'https://' + host.replace(/^\*\./, 'sub.') + '/x.png';
+      assertEqual(PathUtils.isAllowedImageUrl(sample), true,
+        `host_permissions entry ${pattern} must be accepted by isAllowedImageUrl`);
+      if (host.startsWith('*.')) {
+        const bare = 'https://' + host.slice(2) + '/x.png';
+        assertEqual(PathUtils.isAllowedImageUrl(bare), true,
+          `bare domain of ${pattern} must be accepted (Chrome *. patterns match the host itself)`);
+      }
+    }
   });
 });
 

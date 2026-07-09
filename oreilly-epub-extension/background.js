@@ -6,7 +6,16 @@
 // loaded via a script tag where importScripts does not exist but PathUtils
 // is already a global. Do not derive the allowlist from
 // chrome.runtime.getManifest() — the test chrome mock does not stub it.
-if (typeof importScripts === 'function') importScripts('lib/path-utils.js');
+if (typeof importScripts === 'function') {
+  try {
+    importScripts('lib/path-utils.js');
+  } catch (e) {
+    // Fail closed but keep the SW alive: fetchImage's allowlist check will
+    // throw on the missing PathUtils and reject requests, while the message
+    // relay and state handlers keep working.
+    console.error('Failed to load lib/path-utils.js in the service worker:', e);
+  }
+}
 
 const DEFAULT_STATE = {
   status: 'idle', // idle | downloading | complete | error
@@ -183,6 +192,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const response = await fetch(message.url, { credentials: 'include' });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          // Redirects can land outside the allowlist; re-validate the final
+          // URL so an allowed host cannot 302 the credentialed fetch away
+          if (response.url && !PathUtils.isAllowedImageUrl(response.url)) {
+            sendResponse({ ok: false, error: 'Redirected outside allowlist' });
+            return;
+          }
           const contentType = response.headers.get('content-type') || null;
           const buffer = await response.arrayBuffer();
           // Convert to base64 for message passing (ArrayBuffer can't be sent)

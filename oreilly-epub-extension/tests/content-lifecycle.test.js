@@ -117,6 +117,36 @@ describe('content.js book detection and metadata cache', function() {
     }, '9785555555555');
   });
 
+  it('buildEpub retries a fallback-shaped metadata result once (backstop)', async function() {
+    // Drives the retry branch inside buildEpub itself (not via redetectBook):
+    // the first search call fails, the backstop's second call succeeds.
+    const realFetch = window.fetch;
+    const inner = successFetchMock();
+    let searchCalls = 0;
+    const flakyFetch = async (url) => {
+      url = String(url);
+      if (url.startsWith('blob:')) return realFetch(url);
+      if (url.includes('/api/v2/search/')) {
+        searchCalls++;
+        if (searchCalls === 1) return mockResponse({ ok: false, status: 500 });
+      }
+      return inner(url);
+    };
+    await withPatchedEnv(flakyFetch, async () => {
+      lastBlobUrl = null;
+      ChromeMock.clearMessages();
+      ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload' });
+      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        { timeout: 8000, label: 'backstop downloadComplete' });
+      assertEqual(searchCalls, 2, 'fallback-shaped first result must trigger exactly one retry');
+      const buf = await (await window.fetch(lastBlobUrl)).arrayBuffer();
+      const zip = await JSZip.loadAsync(buf);
+      const opf = await zip.file('OEBPS/content.opf').async('string');
+      assertContains(opf, '<dc:title>Test Book</dc:title>',
+        'the retried metadata must reach the OPF');
+    }, '9781414141414');
+  });
+
   it('distrusts rich fields when the search result is a different book', async function() {
     const realFetch = window.fetch;
     const inner = successFetchMock();
