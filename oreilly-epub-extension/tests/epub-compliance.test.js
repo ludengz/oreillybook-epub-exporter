@@ -65,7 +65,18 @@ function complianceFetchMock(origFetch) {
     url = String(url);
     if (url.startsWith('blob:')) return origFetch(url);
     if (url.includes('/api/v2/search/')) {
-      return mockResponse({ jsonBody: { results: [{ title: 'Compliance Book', authors: ['Author A'] }] } });
+      // Rich metadata mirroring the live API shape (archive_id matches the
+      // requested ISBN so rich fields are trusted; topics_payload is the
+      // real-world subjects source)
+      return mockResponse({ jsonBody: { results: [{
+        title: 'Compliance Book', authors: ['Author A'],
+        archive_id: '9782222222222',
+        language: 'en-US',
+        publishers: ["O'Reilly Media, Inc."],
+        issued: '2022-04-01T00:00:00Z',
+        description: '<p>First &amp; second.</p><p>Third.</p>',
+        topics_payload: [{ uuid: 'u1', slug: 'python', name: 'Python' }],
+      }] } });
     }
     if (url.includes('/files/?limit=')) {
       return mockResponse({
@@ -160,5 +171,40 @@ describe('content.js EPUB compliance (integration)', function() {
     const { opf, zipPaths } = await getComplianceEpub();
     assert(zipPaths.includes('OEBPS/Text/cover.xhtml'), 'cover.xhtml should be generated');
     assertContains(opf, 'properties="cover-image"', 'cover image should be marked in the OPF');
+  });
+
+  it('carries rich API metadata end-to-end into the OPF', async function() {
+    const { opf } = await getComplianceEpub();
+    assertContains(opf, '<dc:language>en-US</dc:language>');
+    assertContains(opf, "<dc:publisher>O'Reilly Media, Inc.</dc:publisher>");
+    assertContains(opf, '<dc:subject>Python</dc:subject>');
+    assertContains(opf, '<dc:date>2022-04-01</dc:date>');
+    assertContains(opf, '<dc:description>First &amp; second. Third.</dc:description>');
+  });
+});
+
+// Proxy assertions for the classes of epubcheck failures the in-browser
+// suite can check itself. The real epubcheck run remains the final gate.
+describe('content.js OPF metadata proxy assertions (epubcheck stand-ins)', function() {
+  it('emits a structurally valid short dc:language tag', async function() {
+    const { opf } = await getComplianceEpub();
+    const m = opf.match(/<dc:language>([^<]+)<\/dc:language>/);
+    assert(m, 'OPF must declare dc:language');
+    let structurallyValid = true;
+    try { Intl.getCanonicalLocales(m[1]); } catch (e) { structurallyValid = false; }
+    assert(structurallyValid && /^[a-zA-Z]{2,3}(-|$)/.test(m[1]),
+      `dc:language "${m[1]}" would draw epubcheck OPF-092`);
+  });
+  it('emits dc:date only in ISO prefix form', async function() {
+    const { opf } = await getComplianceEpub();
+    const m = opf.match(/<dc:date>([^<]+)<\/dc:date>/);
+    if (m) {
+      assert(/^\d{4}(-\d{2}){0,2}$/.test(m[1]), `dc:date "${m[1]}" is not YYYY[-MM[-DD]]`);
+    }
+  });
+  it('contains no XML-1.0-illegal code points', async function() {
+    const { opf } = await getComplianceEpub();
+    assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(opf),
+      'OPF contains XML-1.0-illegal code points');
   });
 });

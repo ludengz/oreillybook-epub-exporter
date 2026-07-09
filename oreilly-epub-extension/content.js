@@ -9,7 +9,14 @@
     return parts.length > 1 ? parts[parts.length - 1].trim() : document.title.trim();
   }
 
-  // Fetch book metadata (title, authors) from O'Reilly API
+  // Metadata promise cache keyed by ISBN. Success-only: fallback-shaped
+  // results are evicted so a later call (e.g. the download after a failed
+  // injection-time detect) retries instead of freezing a bad title.
+  const metadataCache = new Map();
+
+  // Fetch book metadata from the O'Reilly search API. Returns title/authors
+  // plus rich OPF fields when the API result is trustworthy; falls back to
+  // document.title parsing otherwise. `fromApi` marks a real API result.
   async function fetchBookMetadata(isbn) {
     try {
       const res = await fetch(`/api/v2/search/?query=${isbn}&limit=1`, { credentials: 'include' });
@@ -17,14 +24,40 @@
         const data = await res.json();
         const book = data.results?.[0];
         if (book) {
-          return {
+          const base = {
             title: book.title || extractBookTitle(),
             authors: book.authors?.length ? book.authors : null,
+            fromApi: true,
           };
+          // The search is fuzzy: results[0] can be a different book.
+          // archive_id carries the platform ISBN used in URLs (the `isbn`
+          // field is the print edition's). Distrust rich fields on mismatch.
+          if (typeof book.archive_id === 'string' && book.archive_id !== isbn) {
+            return base;
+          }
+          return Object.assign(base, {
+            language: book.language,
+            publishers: book.publishers,
+            subjects: book.subjects || book.topics_payload,
+            issued: book.issued,
+            description: book.description,
+            coverUrl: book.cover_url,
+          });
         }
       }
     } catch (e) { console.warn('Metadata fetch failed:', e); }
-    return { title: extractBookTitle(), authors: null };
+    return { title: extractBookTitle(), authors: null, fromApi: false };
+  }
+
+  function fetchBookMetadataCached(isbn) {
+    if (!metadataCache.has(isbn)) {
+      const promise = fetchBookMetadata(isbn).then(meta => {
+        if (!meta.fromApi) metadataCache.delete(isbn);
+        return meta;
+      });
+      metadataCache.set(isbn, promise);
+    }
+    return metadataCache.get(isbn);
   }
 
   // Detect book on page load
@@ -32,9 +65,11 @@
     const isbn = Fetcher.extractIsbn(window.location.href);
     if (!isbn) return;
 
-    const meta = await fetchBookMetadata(isbn);
+    const meta = await fetchBookMetadataCached(isbn);
     const authors = meta.authors || ['Unknown Author'];
 
+    // Payload shape is a frozen contract: popup renders these fields
+    // directly. Rich metadata stays internal to the content script.
     chrome.runtime.sendMessage({
       action: 'bookDetected',
       bookInfo: { isbn, title: meta.title, authors },
@@ -45,6 +80,12 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'startDownload') startDownload();
     else if (message.action === 'cancelDownload') cancelDownload();
+    else if (message.action === 'redetectBook') {
+      // Re-runs detection: groundwork for SPA route changes, and the test
+      // harness's entry point (the injection-time run early-returns there)
+      detectBook().then(() => sendResponse({ ok: true }));
+      return true;
+    }
     else if (message.action === 'getBookInfo') {
       sendResponse({ isbn: Fetcher.extractIsbn(window.location.href) });
       return true;
@@ -373,14 +414,24 @@
       }
     }
 
-    const meta = await fetchBookMetadata(isbn);
+    let meta = await fetchBookMetadataCached(isbn);
+    if (!meta.fromApi) {
+      // Promise-join race backstop: a fallback-shaped result was already
+      // evicted from the cache, so this second call retries once.
+      meta = await fetchBookMetadataCached(isbn);
+    }
     const bookTitle = meta.title;
     const authors = meta.authors || ['Unknown Author'];
+    const rich = EpubBuilder.normalizeMetadata(meta);
 
     const metadata = {
       title: bookTitle, authors, isbn,
-      language: 'en',
+      language: rich.language,
       modified: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      publishers: rich.publishers,
+      subjects: rich.subjects,
+      date: rich.date,
+      description: rich.description,
     };
 
     const allCssFiles = [...cssFilenames, 'eink-override.css'];
