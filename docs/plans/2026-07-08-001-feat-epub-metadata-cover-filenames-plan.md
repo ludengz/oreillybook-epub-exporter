@@ -1,7 +1,7 @@
 ---
 title: "feat: Rich OPF metadata, API cover fallback, and Unicode-safe filenames"
 type: feat
-status: active
+status: completed
 date: 2026-07-08
 origin: docs/ideation/2026-07-08-open-ideation.md
 ---
@@ -136,7 +136,7 @@ flowchart TD
 
 ## Implementation Units
 
-- [ ] **Unit 1: Unicode-safe filename sanitization**
+- [x] **Unit 1: Unicode-safe filename sanitization**
 
 **Goal:** Book titles survive into the download filename; the filename is never empty.
 
@@ -168,7 +168,7 @@ flowchart TD
 **Verification:**
 - New path-utils tests pass alongside the existing suite in `tests/test-runner.html`; a manual download of a CJK-titled book produces a recognizable `.epub` filename.
 
-- [ ] **Unit 2: Rich metadata pipeline (fetch → normalize → OPF)**
+- [x] **Unit 2: Rich metadata pipeline (fetch → normalize → OPF)**
 
 **Goal:** The OPF carries real language/publisher/description/date/subjects from the API; metadata is fetched once per book; malformed API data can never break XML well-formedness or epubcheck compliance.
 
@@ -209,7 +209,7 @@ flowchart TD
 **Verification:**
 - All suites pass; a compliance-test OPF shows the new fields; behavior with the fixture's minimal metadata is byte-compatible with today's OPF metadata block except for intended additions.
 
-- [ ] **Unit 3: API cover fallback**
+- [x] **Unit 3: API cover fallback**
 
 **Goal:** Books without a heuristic-detectable cover get the API cover with full parity to the heuristic path; every failure mode yields a valid, coverless EPUB.
 
