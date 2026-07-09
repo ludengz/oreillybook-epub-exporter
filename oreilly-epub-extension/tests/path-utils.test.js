@@ -59,6 +59,24 @@ describe('PathUtils.createUniqueNamer', function() {
   });
 });
 
+describe('PathUtils.isAllowedImageUrl', function() {
+  it('accepts the O\'Reilly hosts over https', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('https://learning.oreilly.com/library/cover/x/'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://cdn.oreillystatic.com/a.png'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://oreillystatic.com/a.png'), true);
+    assertEqual(PathUtils.isAllowedImageUrl('https://www.safaribooksonline.com/a.jpg'), true);
+  });
+  it('rejects suffix-spoofing and lookalike hosts', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('https://oreillystatic.com.evil.example/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('https://xlearning.oreilly.com/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('https://notoreillystatic.com/a.png'), false);
+  });
+  it('rejects non-https schemes and junk', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('http://learning.oreilly.com/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('not a url'), false);
+  });
+});
+
 describe('PathUtils.sanitizeFilename', function() {
   const FB = 'book-9781234567890';
   it('preserves CJK titles unchanged', function() {

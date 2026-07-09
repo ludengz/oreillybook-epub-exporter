@@ -30,6 +30,22 @@ const PathUtils = {
     return { resolved: this.normalizePath(combined), isAbsolute: false };
   },
 
+  // Allowlist for credentialed image fetches, mirroring manifest.json
+  // host_permissions. Exact-or-dot-suffix matching only — substring checks
+  // would let "oreillystatic.com.evil.example" through. Shared by content.js
+  // and background.js (the SW loads this file via guarded importScripts).
+  isAllowedImageUrl(url) {
+    let u;
+    try { u = new URL(url); } catch (e) { return false; }
+    if (u.protocol !== 'https:') return false;
+    const host = u.hostname.toLowerCase();
+    if (host === 'learning.oreilly.com') return true;
+    for (const domain of ['oreillystatic.com', 'safaribooksonline.com']) {
+      if (host === domain || host.endsWith('.' + domain)) return true;
+    }
+    return false;
+  },
+
   // Sanitize a book title into a download filename stem. Preserves Unicode,
   // case, and spaces; strips only what filesystems cannot take. Returns
   // `fallback` when nothing usable remains (a pure-CJK title used to be

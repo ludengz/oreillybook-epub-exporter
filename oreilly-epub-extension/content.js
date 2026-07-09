@@ -99,7 +99,9 @@
     }
   }
 
-  // Fetch image via background service worker (CORS proxy)
+  // Fetch image via background service worker (CORS proxy). Resolves with
+  // { buffer, contentType } — contentType is optional (older SW versions
+  // during dev reloads may not send it).
   async function fetchImageViaBackground(url) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action: 'fetchImage', url }, (response) => {
@@ -117,9 +119,62 @@
         for (let i = 0; i < binary.length; i++) {
           bytes[i] = binary.charCodeAt(i);
         }
-        resolve(bytes.buffer);
+        resolve({ buffer: bytes.buffer, contentType: response.contentType || null });
       });
     });
+  }
+
+  // Fetch the API-provided cover as a fallback when the filename heuristic
+  // finds nothing. Fail-closed: any miss in the chain (bad URL, disallowed
+  // host, unusable media type, fetch failure) yields null — a coverless but
+  // valid EPUB — never a mislabeled manifest entry.
+  async function fetchCoverFallback(coverUrl, zip, uniqueFilename, signal) {
+    // Whitelisted cover types (WebP excluded on this path for older-reader
+    // compatibility; the heuristic path ships whatever the publisher packed)
+    const EXT_BY_TYPE = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif' };
+    const URL_EXTENSIONS = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' };
+    try {
+      // Normalize relative/protocol-relative values against the site origin
+      const absolute = new URL(coverUrl, 'https://learning.oreilly.com').href;
+      if (!PathUtils.isAllowedImageUrl(absolute)) {
+        console.warn('Cover fallback skipped: URL not allowed:', absolute);
+        return null;
+      }
+      // Single attempt with a timeout; the cover is an optional asset
+      const result = await Promise.race([
+        fetchImageViaBackground(absolute),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('cover fetch timeout')), 15000)),
+      ]);
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
+      // The ZIP filename extension is always derived from the EFFECTIVE
+      // media type so generateOpf's filename-based _mimeType matches the
+      // served bytes (a .png URL serving image/jpeg is stored as .jpg —
+      // otherwise epubcheck flags an OPF-029 signature mismatch).
+      // Content-Type wins when present; the URL extension is only consulted
+      // when Content-Type is absent (dev-time SW version skew). A present
+      // but non-whitelisted type (e.g. image/webp, text/html) skips.
+      const contentType = (result.contentType || '').split(';')[0].trim().toLowerCase();
+      let ext = null;
+      if (contentType) {
+        ext = EXT_BY_TYPE[contentType] || null;
+      } else {
+        const urlExt = PathUtils.stripQueryAndHash(absolute).split('.').pop().toLowerCase();
+        ext = URL_EXTENSIONS[urlExt] || null;
+      }
+      if (!ext) {
+        console.warn('Cover fallback skipped: no usable image type for', absolute);
+        return null;
+      }
+      const filename = uniqueFilename(`cover.${ext}`);
+      zip.file(`OEBPS/Images/${filename}`, result.buffer);
+      return filename;
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      console.warn('Cover fallback failed:', err.message);
+      return null;
+    }
   }
 
   async function startDownload() {
@@ -386,7 +441,7 @@
           // Only for absolute URLs — relative paths that failed Strategy 3 cannot be fetched this way
           if (isAbsolute) {
             try {
-              const buffer = await fetchImageViaBackground(resolved);
+              const { buffer } = await fetchImageViaBackground(resolved);
               zip.file(`OEBPS/Images/${imgFilename}`, buffer);
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
@@ -444,11 +499,25 @@
       ...Object.values(imageMap),
     ])];
 
-    const coverImage = EpubBuilder.findCoverImage(allImageFiles);
+    let coverImage = EpubBuilder.findCoverImage(allImageFiles);
+    if (!coverImage && rich.coverUrl) {
+      // The heuristic found nothing — fall back to the API cover. Accounted
+      // in allImageFiles only after the ZIP write succeeded (orphan-resource
+      // invariant), with the namer's return value used everywhere.
+      const fallbackCover = await fetchCoverFallback(rich.coverUrl, zip, uniqueFilename, signal);
+      if (fallbackCover) {
+        allImageFiles.push(fallbackCover);
+        coverImage = fallbackCover;
+      }
+    }
     if (coverImage) {
       zip.file('OEBPS/Text/cover.xhtml', EpubBuilder.generateCoverXhtml(bookTitle, coverImage));
       chapters.unshift({ filename: 'cover.xhtml', title: 'Cover' });
     }
+
+    // The post-chapter-loop window has no other abort checks; a cancel that
+    // landed during the cover fetch must not produce a completed download
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
     zip.file('OEBPS/content.opf', EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage));
     zip.file('OEBPS/toc.xhtml', EpubBuilder.generateTocXhtml(metadata.title, chapters));
