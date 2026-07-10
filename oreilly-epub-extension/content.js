@@ -169,6 +169,16 @@
     if (log.css.length < FAILURE_DETAIL_CAP) log.css.push(path);
   }
 
+  // On a library proxy the session belongs to the proxy, not to O'Reilly:
+  // telling a library user to "log in to O'Reilly" sends them to a site where
+  // they have no account. Both variants keep the "Session expired." prefix that
+  // the SW's notification title falls back to matching.
+  function sessionExpiredMessage() {
+    return PathUtils.pageOrigin() === 'https://learning.oreilly.com'
+      ? 'Session expired. Please log in to O\'Reilly and try again.'
+      : 'Session expired. Sign in again through your library\'s portal, reload this page, and retry.';
+  }
+
   // A fatal integrity violation blocks delivery: the error carries the full
   // violation list; the user-facing message caps at three entries.
   function validationError(violations) {
@@ -316,8 +326,11 @@
       const allFiles = [];
       let nextUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
       while (nextUrl) {
-        const filesRes = await fetch(nextUrl, { credentials: 'include', signal });
-        if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
+        // Via _fetchWithRetry, not a bare fetch: this is the first API call of
+        // a download, so an expired session lands here first. The bare fetch
+        // used to follow a proxy login redirect into a 200 HTML page, pass the
+        // `.ok` check, and die inside .json() with a cryptic SyntaxError.
+        const filesRes = await Fetcher._fetchWithRetry(nextUrl, { signal });
         const filesData = await filesRes.json();
         const results = filesData.results || filesData;
         allFiles.push(...(Array.isArray(results) ? results : []));
@@ -371,9 +384,7 @@
       chrome.runtime.sendMessage({
         action: 'downloadError',
         attemptId: currentAttemptId,
-        error: err.message === 'SESSION_EXPIRED'
-          ? 'Session expired. Please log in to O\'Reilly and try again.'
-          : err.message,
+        error: err.message === 'SESSION_EXPIRED' ? sessionExpiredMessage() : err.message,
         errorKind,
         report: buildReport(failureLog, {
           isbn,

@@ -11,7 +11,18 @@ const Fetcher = {
     const maxRateLimitRetries = 5;
     while (attempt <= maxRetries) {
       try {
-        const response = await fetch(url, { signal, credentials: 'include' });
+        // redirect:'manual' is load-bearing, not a stylistic choice. A library
+        // proxy answers an expired session with a 302 to its login host; under
+        // the default 'follow' that cross-origin hop is CORS-blocked into a
+        // TypeError indistinguishable from being offline, and the response is
+        // never readable. 'manual' surfaces it as an opaque redirect instead —
+        // the only observable signal, and one that works whether the login host
+        // is same-origin or not. No O'Reilly API endpoint legitimately
+        // redirects, in either direct or proxy mode (verified 2026-07-10).
+        const response = await fetch(url, { signal, credentials: 'include', redirect: 'manual' });
+        // Checked before `!response.ok`: an opaque redirect reports status 0,
+        // which would otherwise be retried as a transient "HTTP 0".
+        if (response.type === 'opaqueredirect') throw new Error('SESSION_EXPIRED');
         if (response.status === 429 || response.status === 403) {
           rateLimitRetries++;
           if (rateLimitRetries > maxRateLimitRetries) throw new Error('Rate limit exceeded');

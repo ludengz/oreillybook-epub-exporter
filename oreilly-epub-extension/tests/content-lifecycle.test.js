@@ -16,6 +16,17 @@ function mockResponse({ ok = true, status = 200, jsonBody = null, textBody = '',
 
 const TEST_CHAPTER_XHTML = '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ch 1</title></head><body><h1>Chapter One</h1><p>text</p></body></html>';
 
+// Collapse _fetchWithRetry's 1s/3s/9s backoff for tests that deliberately fail
+// a fetch. File-scoped: both the report-bookkeeping and download-lifecycle
+// suites need it now that the file manifest also goes through the retry path.
+async function withNoRetries(body) {
+  const origRetry = Fetcher._fetchWithRetry;
+  Fetcher._fetchWithRetry = function(url, opts) {
+    return origRetry.call(Fetcher, url, Object.assign({}, opts, { maxRetries: 0 }));
+  };
+  try { await body(); } finally { Fetcher._fetchWithRetry = origRetry; }
+}
+
 // Fetch mock simulating a healthy O'Reilly API with a one-chapter book
 function successFetchMock() {
   return async (url) => {
@@ -184,14 +195,6 @@ describe('content.js book detection and metadata cache', function() {
 describe('content.js quality report bookkeeping', function() {
   const CHAPTER_WITH_IMG = '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>C</title></head><body><h1>C</h1><img src="images/gone.png"/></body></html>';
 
-  async function withNoRetries(body) {
-    const origRetry = Fetcher._fetchWithRetry;
-    Fetcher._fetchWithRetry = function(url, opts) {
-      return origRetry.call(Fetcher, url, Object.assign({}, opts, { maxRetries: 0 }));
-    };
-    try { await body(); } finally { Fetcher._fetchWithRetry = origRetry; }
-  }
-
   async function runDownload(attemptId, terminalAction = 'downloadComplete', timeout = 8000) {
     await ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'cancelDownload' });
     ChromeMock.clearMessages();
@@ -329,6 +332,94 @@ describe('content.js quality report bookkeeping', function() {
     }, '9787000000013');
   });
 
+  it('aborts on a library-proxy login redirect and never packages the login page', async function() {
+    // EZproxy bounces an expired session to its login host. Seen through
+    // redirect:'manual' that is an opaque redirect; the chapter fetch must die
+    // there, so no login HTML can reach the ZIP.
+    const LOGIN_HTML = '<html><body><form action="/login"><input name="password"/></form></body></html>';
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Proxy Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return mockResponse({ jsonBody: { results: [
+          { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
+        ], next: null } });
+      }
+      if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body {}' });
+      if (url.includes('/files/ch1.xhtml')) {
+        // What `follow` would have handed us: a 200 login page. `manual` gives
+        // this instead — and the body must never be read.
+        return Object.assign(
+          mockResponse({ ok: false, status: 0, textBody: LOGIN_HTML }),
+          { type: 'opaqueredirect' }
+        );
+      }
+      return mockResponse({ ok: false, status: 404 });
+    };
+    const origPageOrigin = PathUtils.pageOrigin;
+    PathUtils.pageOrigin = () => 'https://learning-oreilly-com.ezproxy.spl.org';
+    try {
+      await withPatchedEnv(fetchMock, async () => {
+        const msg = await runDownload('rep-proxy-1', 'downloadError');
+        assertEqual(msg.errorKind, 'session');
+        assertContains(msg.error, 'library');
+        assert(!/log in to O'Reilly/.test(msg.error),
+          'a library user has no O\'Reilly account to log into');
+        assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+          'no EPUB may be delivered — a login page is not a chapter');
+        assertEqual(msg.report.counts.chaptersOk, 0);
+      }, '9787000000021');
+    } finally {
+      PathUtils.pageOrigin = origPageOrigin;
+    }
+  });
+
+  it('reports an expired session on the file manifest, not a JSON parse error', async function() {
+    // The manifest is the first API call of a download, so a proxy login bounce
+    // lands here before any chapter. A bare fetch would have followed the
+    // redirect to a 200 HTML login page and thrown SyntaxError inside .json().
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Manifest Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return Object.assign(mockResponse({ ok: false, status: 0 }), { type: 'opaqueredirect' });
+      }
+      return mockResponse({ ok: false, status: 404 });
+    };
+    await withPatchedEnv(fetchMock, async () => {
+      const msg = await runDownload('rep-proxy-2', 'downloadError');
+      assertEqual(msg.errorKind, 'session');
+      assert(!/JSON|Unexpected token|SyntaxError/i.test(msg.error),
+        `expiry must not surface as a parse error, got: ${msg.error}`);
+    }, '9787000000023');
+  });
+
+  it('keeps the direct-mode expiry copy pointing at O\'Reilly', async function() {
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Direct Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) return mockResponse({ ok: false, status: 401 });
+      return mockResponse({ ok: false, status: 404 });
+    };
+    const origPageOrigin = PathUtils.pageOrigin;
+    PathUtils.pageOrigin = () => 'https://learning.oreilly.com';
+    try {
+      await withPatchedEnv(fetchMock, async () => {
+        const msg = await runDownload('rep-direct-1', 'downloadError');
+        assertEqual(msg.errorKind, 'session');
+        assertContains(msg.error, 'log in to O\'Reilly');
+      }, '9787000000022');
+    } finally {
+      PathUtils.pageOrigin = origPageOrigin;
+    }
+  });
+
   it('caps failure detail at 50 per category while totals stay exact', async function() {
     const imageEntries = [];
     for (let i = 0; i < 52; i++) {
@@ -369,14 +460,20 @@ describe('content.js quality report bookkeeping', function() {
       }
       return mockResponse({ ok: false, status: 500 });
     };
-    await withPatchedEnv(failingManifest, async () => {
-      const msg = await runDownload('rep-4', 'downloadError');
-      assert(msg.report, 'downloadError must carry the partial report');
-      assertEqual(msg.report.outcome, 'error');
-      assertEqual(msg.report.attemptId, 'rep-4');
-      assertEqual(msg.report.counts.chaptersOk, 0);
-      assertEqual(msg.errorKind, 'download');
-    }, '9787000000005');
+    // The manifest fetch now goes through _fetchWithRetry, so a 500 is retried
+    // with backoff before it becomes terminal — a deliberate improvement (a
+    // transient 500 on page 3 of pagination used to kill the whole download).
+    // Retries are disabled here to keep the test fast.
+    await withNoRetries(async () => {
+      await withPatchedEnv(failingManifest, async () => {
+        const msg = await runDownload('rep-4', 'downloadError');
+        assert(msg.report, 'downloadError must carry the partial report');
+        assertEqual(msg.report.outcome, 'error');
+        assertEqual(msg.report.attemptId, 'rep-4');
+        assertEqual(msg.report.counts.chaptersOk, 0);
+        assertEqual(msg.errorKind, 'download');
+      }, '9787000000005');
+    });
   });
 
   it('flags page-fallback metadata in the report', async function() {
@@ -430,18 +527,22 @@ describe('content.js download lifecycle', function() {
 
   it('allows retry after a failed download', async function() {
     const failingFetch = async () => mockResponse({ ok: false, status: 500 });
-    await withPatchedEnv(failingFetch, async () => {
-      await ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'cancelDownload' });
-      ChromeMock.clearMessages();
+    // The manifest fetch retries with backoff now; disable it so two full
+    // download attempts still fit inside the timeouts.
+    await withNoRetries(async () => {
+      await withPatchedEnv(failingFetch, async () => {
+        await ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'cancelDownload' });
+        ChromeMock.clearMessages();
 
-      ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload' });
-      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
-        { timeout: 8000, label: 'first downloadError' });
+        ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload' });
+        await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
+          { timeout: 8000, label: 'first downloadError' });
 
-      ChromeMock.clearMessages();
-      ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload' });
-      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
-        { timeout: 8000, label: 'second downloadError (download state must reset after failure)' });
+        ChromeMock.clearMessages();
+        ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload' });
+        await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
+          { timeout: 8000, label: 'second downloadError (download state must reset after failure)' });
+      });
     });
   });
 });
