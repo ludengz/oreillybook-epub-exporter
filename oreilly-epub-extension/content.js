@@ -173,8 +173,16 @@
   // telling a library user to "log in to O'Reilly" sends them to a site where
   // they have no account. Both variants keep the "Session expired." prefix that
   // the SW's notification title falls back to matching.
+  // 'direct' on learning.oreilly.com, 'proxy' on a declared library host. The
+  // download behaves differently on each (error copy, URL rewriting, the SW
+  // allowlist host), so the mode is carried as structured report data rather
+  // than left inferable only from the English error string.
+  function pageMode() {
+    return PathUtils.pageOrigin() === 'https://' + PathUtils.DIRECT_HOST ? 'direct' : 'proxy';
+  }
+
   function sessionExpiredMessage() {
-    return PathUtils.pageOrigin() === 'https://' + PathUtils.DIRECT_HOST
+    return pageMode() === 'direct'
       ? 'Session expired. Please log in to O\'Reilly and try again.'
       : 'Session expired. Sign in again through your library\'s portal, reload this page, and retry.';
   }
@@ -199,6 +207,11 @@
       bookTitle,
       timestamp: new Date().toISOString(),
       outcome,
+      // 'direct' | 'proxy' — lets a consumer distinguish an expired library
+      // session from an expired O'Reilly session (both errorKind 'session')
+      // by composing errorKind==='session' && mode==='proxy', instead of
+      // substring-matching the user-facing error prose.
+      mode: pageMode(),
       errorKind: errorKind || null,
       validated: !!validated,
       validationWarnings: validationWarnings || [],

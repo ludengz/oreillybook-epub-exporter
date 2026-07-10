@@ -370,6 +370,10 @@ describe('content.js quality report bookkeeping', function() {
         assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
           'no EPUB may be delivered — a login page is not a chapter');
         assertEqual(msg.report.counts.chaptersOk, 0);
+        // The report carries the mode as structured data, so a consumer can
+        // route recovery (errorKind==='session' && mode==='proxy') without
+        // substring-matching the error prose.
+        assertEqual(msg.report.mode, 'proxy');
       }, '9787000000021');
     } finally {
       PathUtils.pageOrigin = origPageOrigin;
@@ -414,6 +418,7 @@ describe('content.js quality report bookkeeping', function() {
         const msg = await runDownload('rep-direct-1', 'downloadError');
         assertEqual(msg.errorKind, 'session');
         assertContains(msg.error, 'log in to O\'Reilly');
+        assertEqual(msg.report.mode, 'direct');
       }, '9787000000022');
     } finally {
       PathUtils.pageOrigin = origPageOrigin;
