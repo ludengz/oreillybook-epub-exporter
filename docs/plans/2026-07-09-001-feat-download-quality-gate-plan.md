@@ -1,7 +1,7 @@
 ---
 title: "feat: Download Quality Gate — pre-package validation, quality report, notifications"
 type: feat
-status: active
+status: completed
 date: 2026-07-09
 origin: docs/ideation/2026-07-08-open-ideation.md
 ---
@@ -109,7 +109,7 @@ Report flow: content script accumulates a failure log during phases 1–2 → va
 
 ## Implementation Units
 
-- [ ] **Unit 1: Attempt-generation guards and stable `complete` state**
+- [x] **Unit 1: Attempt-generation guards and stable `complete` state**
 
 **Goal:** Eliminate the lifecycle races and the 5s timer so the new report/notification features sit on a deterministic state machine.
 
@@ -145,7 +145,7 @@ Report flow: content script accumulates a failure log during phases 1–2 → va
 **Verification:**
 - All existing 130 tests still pass; new guard tests pass; grep confirms no `setTimeout` remains in `background.js` state paths.
 
-- [ ] **Unit 2: Structured failure bookkeeping and report snapshot**
+- [x] **Unit 2: Structured failure bookkeeping and report snapshot**
 
 **Goal:** Replace silent degradation with a per-attempt structured report that reaches session state.
 
@@ -183,7 +183,7 @@ Report flow: content script accumulates a failure log during phases 1–2 → va
 **Verification:**
 - Report in `chrome.storage.session` after a mock download matches injected failure fixture exactly; compliance suite still green.
 
-- [ ] **Unit 3: `EpubValidator` module and packaging gate**
+- [x] **Unit 3: `EpubValidator` module and packaging gate**
 
 **Goal:** Enforce the manifest↔ZIP↔spine invariants at runtime; block delivery of inconsistent EPUBs.
 
@@ -227,7 +227,7 @@ Report flow: content script accumulates a failure log during phases 1–2 → va
 **Verification:**
 - Validator suite green; compliance suite green (proving no false positives on known-good output); epubcheck spot-check on a generated EPUB still reports 0/0/0.
 
-- [ ] **Unit 4: Popup `complete` state, quality report panel, re-download action**
+- [x] **Unit 4: Popup `complete` state, quality report panel, re-download action**
 
 **Goal:** Make results visible: a report panel correctly attributed to its book, with a full re-download button and error-kind-aware messaging.
 
@@ -262,7 +262,7 @@ Report flow: content script accumulates a failure log during phases 1–2 → va
 **Verification:**
 - Manual walkthrough of the four popup states plus the two new ones (complete-with-report, validation-error) against a live or mock download; state tests green.
 
-- [ ] **Unit 5: System notifications with popup suppression and click-to-focus**
+- [x] **Unit 5: System notifications with popup suppression and click-to-focus**
 
 **Goal:** Popup-closed downloads no longer end invisibly: complete/fail notifications with report summaries.
 
