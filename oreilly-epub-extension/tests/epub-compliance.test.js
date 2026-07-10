@@ -468,8 +468,8 @@ describe('content.js API cover fallback (integration)', function() {
       }),
       fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
     });
-    // Before the local allowlist gate was removed this call never happened and
-    // every library book shipped coverless.
+    // The local allowlist gate would reject this proxied host; without it the
+    // cover reaches the SW (the single enforcement point) and is packaged.
     assertEqual(fetchImageUrls[0], proxiedCover,
       'an already-proxied cover_url must reach the SW untouched');
     assert(zipPaths.includes('OEBPS/Images/cover.jpg'), 'the proxied cover must be packaged');

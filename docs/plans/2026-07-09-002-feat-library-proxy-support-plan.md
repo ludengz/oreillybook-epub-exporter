@@ -107,7 +107,7 @@ flowchart TD
     C -->|"NEW: host-swap when hostname is<br/>exactly learning.oreilly.com"| ABS["absolute URLs:<br/>cover_url, chapter images"]
     ABS -->|swapped → same-origin| API
     ABS -->|proxied CDN, if any| SW["SW fetchImage<br/>allowlist + declared proxy hosts"]
-    API -->|"NEW: 302→login or text/html<br/>on an /api/ path"| EXP["SESSION_EXPIRED<br/>(library-specific copy)"]
+    API -->|"NEW: 302→login seen as an<br/>opaque redirect, or HTTP 401"| EXP["SESSION_EXPIRED<br/>(library-specific copy)"]
     EXP -.->|abort before packaging| ZIP["EPUB"]
     API -->|chapters, CSS, images| ZIP
 ```

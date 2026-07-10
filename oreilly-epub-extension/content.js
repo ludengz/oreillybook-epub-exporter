@@ -327,9 +327,9 @@
       let nextUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
       while (nextUrl) {
         // Via _fetchWithRetry, not a bare fetch: this is the first API call of
-        // a download, so an expired session lands here first. The bare fetch
-        // used to follow a proxy login redirect into a 200 HTML page, pass the
-        // `.ok` check, and die inside .json() with a cryptic SyntaxError.
+        // a download, so an expired session lands here first. A bare fetch
+        // would follow a proxy login redirect into a 200 HTML page, pass the
+        // `.ok` check, and throw inside .json() with a cryptic SyntaxError.
         const filesRes = await Fetcher._fetchWithRetry(nextUrl, { signal });
         const filesData = await filesRes.json();
         const results = filesData.results || filesData;

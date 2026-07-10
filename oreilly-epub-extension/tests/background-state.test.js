@@ -422,4 +422,44 @@ describe('background.js fetchImage proxy', function() {
         'a credentialed fetch that 302s off-allowlist must be rejected');
     });
   });
+
+  // fetchCoverFallback dropped its local allowlist gate, so the SW handler is
+  // now the single enforcement point for a library-proxy cover_url. The
+  // isAllowedImageUrl unit tests cover the predicate; these prove the real
+  // handler admits the proxy host at BOTH checkpoints (entry + post-redirect).
+  it('accepts the declared library proxy host at the entry check', async function() {
+    const bytes = new Uint8Array([4, 5, 6]);
+    await withPatchedFetch(async () => ({
+      ok: true,
+      headers: new Headers({ 'content-type': 'image/jpeg' }),
+      arrayBuffer: async () => bytes.buffer,
+    }), async () => {
+      const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, {
+        action: 'fetchImage',
+        url: 'https://learning-oreilly-com.ezproxy.spl.org/library/cover/123/',
+      });
+      assert(response && response.ok === true, `expected ok:true, got ${JSON.stringify(response)}`);
+      assertEqual(response.data, btoa(String.fromCharCode(4, 5, 6)));
+    });
+  });
+
+  it('accepts a response whose post-redirect URL stays on an allowlisted host', async function() {
+    // The reject direction is covered above; this pins the accept direction so
+    // a regression that over-tightens the post-redirect check (and silently
+    // drops every proxy cover) turns a test red.
+    const bytes = new Uint8Array([7, 8, 9]);
+    await withPatchedFetch(async () => ({
+      ok: true,
+      url: 'https://learning-oreilly-com.ezproxy.spl.org/library/cover/123/final.jpg',
+      headers: new Headers({ 'content-type': 'image/jpeg' }),
+      arrayBuffer: async () => bytes.buffer,
+    }), async () => {
+      const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, {
+        action: 'fetchImage',
+        url: 'https://learning-oreilly-com.ezproxy.spl.org/library/cover/123/',
+      });
+      assert(response && response.ok === true,
+        'a credentialed fetch that stays on an allowlisted host must be accepted');
+    });
+  });
 });
