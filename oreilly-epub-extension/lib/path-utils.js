@@ -30,6 +30,13 @@ const PathUtils = {
     return { resolved: this.normalizePath(combined), isAbsolute: false };
   },
 
+  // The canonical direct O'Reilly host. Single source of truth for the three
+  // places that must agree: the allowlist below, rewriteToPageOrigin's
+  // "is this a real-host URL" check, and sessionExpiredMessage's direct/proxy
+  // branch. Kept as a hostname (no scheme); prefix 'https://' where an origin
+  // is needed.
+  DIRECT_HOST: 'learning.oreilly.com',
+
   // Exact hostnames for credentialed image fetches. Library proxy hosts belong
   // here and never in the suffix list: a dot-suffix rule would also accept
   // "learning-oreilly-com.ezproxy.spl.org.evil.example".
@@ -85,7 +92,7 @@ const PathUtils = {
     try { u = new URL(url); } catch (e) { return url; } // relative: caller resolves
     try { base = new URL(this.pageOrigin()); } catch (e) { return url; }
     if (base.protocol !== 'https:') return url; // never downgrade or leave https
-    if (u.hostname.toLowerCase() !== 'learning.oreilly.com') return url;
+    if (u.hostname.toLowerCase() !== this.DIRECT_HOST) return url;
     if (u.origin === base.origin) return url; // direct mode
     u.protocol = base.protocol;
     u.host = base.host;

@@ -77,6 +77,14 @@ describe('PathUtils.isAllowedImageUrl', function() {
     assertEqual(PathUtils.isAllowedImageUrl(undefined), false);
     assertEqual(PathUtils.isAllowedImageUrl(null), false);
   });
+  it('keeps DIRECT_HOST as the first allowlisted host (single source of truth)', function() {
+    // DIRECT_HOST feeds rewriteToPageOrigin and sessionExpiredMessage; it must
+    // stay in the credentialed-fetch allowlist or those two would diverge from
+    // what the SW proxy accepts.
+    assertEqual(PathUtils.DIRECT_HOST, 'learning.oreilly.com');
+    assert(PathUtils.ALLOWED_IMAGE_HOSTS.includes(PathUtils.DIRECT_HOST),
+      'DIRECT_HOST must be in ALLOWED_IMAGE_HOSTS');
+  });
   it('accepts the declared library proxy host', function() {
     assertEqual(PathUtils.isAllowedImageUrl('https://learning-oreilly-com.ezproxy.spl.org/a.png'), true);
     assertEqual(

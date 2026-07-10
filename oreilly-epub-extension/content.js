@@ -174,7 +174,7 @@
   // they have no account. Both variants keep the "Session expired." prefix that
   // the SW's notification title falls back to matching.
   function sessionExpiredMessage() {
-    return PathUtils.pageOrigin() === 'https://learning.oreilly.com'
+    return PathUtils.pageOrigin() === 'https://' + PathUtils.DIRECT_HOST
       ? 'Session expired. Please log in to O\'Reilly and try again.'
       : 'Session expired. Sign in again through your library\'s portal, reload this page, and retry.';
   }
