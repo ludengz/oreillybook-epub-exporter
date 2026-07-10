@@ -182,13 +182,14 @@
   // Assemble the per-attempt quality report that rides the terminal
   // lifecycle message (downloadComplete or downloadError with the partial
   // log). The SW snapshots it into reportByTab keyed by the sender tab.
-  function buildReport(log, { isbn, bookTitle, outcome, coverPresent, metadataFromApi, validated, validationWarnings, validationViolations }) {
+  function buildReport(log, { isbn, bookTitle, outcome, errorKind, coverPresent, metadataFromApi, validated, validationWarnings, validationViolations }) {
     return {
       attemptId: currentAttemptId,
       isbn,
       bookTitle,
       timestamp: new Date().toISOString(),
       outcome,
+      errorKind: errorKind || null,
       validated: !!validated,
       validationWarnings: validationWarnings || [],
       validationViolations: validationViolations || [],
@@ -357,19 +358,21 @@
       console.error('Download failed:', err);
       // The partial report travels with the error so the bookkeeping
       // accumulated before the failure is not lost
+      const errorKind = err.validationViolations ? 'validation'
+        : err.message === 'SESSION_EXPIRED' ? 'session'
+        : 'download';
       chrome.runtime.sendMessage({
         action: 'downloadError',
         attemptId: currentAttemptId,
         error: err.message === 'SESSION_EXPIRED'
           ? 'Session expired. Please log in to O\'Reilly and try again.'
           : err.message,
-        errorKind: err.validationViolations ? 'validation'
-          : err.message === 'SESSION_EXPIRED' ? 'session'
-          : 'download',
+        errorKind,
         report: buildReport(failureLog, {
           isbn,
           bookTitle: extractBookTitle(),
           outcome: 'error',
+          errorKind,
           coverPresent: false,
           metadataFromApi: false,
           validated: false,

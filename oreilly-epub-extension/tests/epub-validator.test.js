@@ -5,7 +5,7 @@ const VALIDATOR_XHTML = '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http
 
 // Minimal but complete EPUB skeleton mirroring buildEpub's real assembly
 // order (mimetype first, STORE) so the validator sees production shapes.
-function makeEpubFixture({ mimetypeFirst = true, storeMimetype = true, chapterXhtml = VALIDATOR_XHTML } = {}) {
+function makeEpubFixture({ mimetypeFirst = true, storeMimetype = true, chapterXhtml = VALIDATOR_XHTML, imageName = 'fig.png' } = {}) {
   const metadata = {
     title: 'Validator Book', authors: ['A'], isbn: '9781234567890',
     language: 'en', modified: '2024-01-01T00:00:00Z',
@@ -21,8 +21,8 @@ function makeEpubFixture({ mimetypeFirst = true, storeMimetype = true, chapterXh
   }
   zip.file('OEBPS/Text/chapter_01.xhtml', chapterXhtml);
   zip.file('OEBPS/Styles/eink-override.css', 'body {}');
-  zip.file('OEBPS/Images/fig.png', new ArrayBuffer(4));
-  const opf = EpubBuilder.generateOpf(metadata, chapters, ['fig.png'], ['eink-override.css'], null);
+  zip.file(`OEBPS/Images/${imageName}`, new ArrayBuffer(4));
+  const opf = EpubBuilder.generateOpf(metadata, chapters, [imageName], ['eink-override.css'], null);
   zip.file('OEBPS/content.opf', opf);
   zip.file('OEBPS/toc.xhtml', EpubBuilder.generateTocXhtml(metadata.title, chapters));
   zip.file('OEBPS/toc.ncx', EpubBuilder.generateTocNcx(metadata.isbn, metadata.title, chapters));
@@ -85,6 +85,16 @@ describe('EpubValidator.validateStructure', function() {
       `expected a chapter warning, got: ${result.warnings.join('; ')}`);
   });
 
+  it('keeps a well-formed OPF and clean reconciliation for XML-special filenames', async function() {
+    // A legal filename containing & must neither break OPF parsing (builder
+    // escapes hrefs) nor mismatch the raw ZIP name (DOM unescapes on read)
+    const { zip, opf } = makeEpubFixture({ imageName: 'fig&1.png' });
+    assertContains(opf, 'href="Images/fig&amp;1.png"', 'builder must XML-escape hrefs');
+    const result = await EpubValidator.validateStructure(zip, opf);
+    assertEqual(result.fatal.length, 0, `unexpected fatal: ${result.fatal.join('; ')}`);
+    assertEqual(result.warnings.length, 0, `unexpected warnings: ${result.warnings.join('; ')}`);
+  });
+
   it('flags a malformed OPF as fatal', async function() {
     const { zip } = makeEpubFixture();
     const result = await EpubValidator.validateStructure(zip, '<package><unclosed</package>');
@@ -109,6 +119,16 @@ describe('EpubValidator.validateBlob', function() {
     const result = await EpubValidator.validateBlob(blob);
     assertEqual(result.fatal.length, 1);
     assertContains(result.fatal[0], 'mimetype');
+  });
+
+  it('flags a compressed first mimetype entry as fatal', async function() {
+    const zip = new JSZip();
+    zip.file('mimetype', 'application/epub+zip', { compression: 'DEFLATE' });
+    zip.file('META-INF/container.xml', '<x/>');
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const result = await EpubValidator.validateBlob(blob);
+    assertEqual(result.fatal.length, 1);
+    assertContains(result.fatal[0], 'compressed');
   });
 
   it('flags a non-ZIP blob as fatal', async function() {

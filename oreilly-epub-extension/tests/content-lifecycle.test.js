@@ -192,12 +192,12 @@ describe('content.js quality report bookkeeping', function() {
     try { await body(); } finally { Fetcher._fetchWithRetry = origRetry; }
   }
 
-  async function runDownload(attemptId, terminalAction = 'downloadComplete') {
+  async function runDownload(attemptId, terminalAction = 'downloadComplete', timeout = 8000) {
     await ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'cancelDownload' });
     ChromeMock.clearMessages();
     ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload', attemptId });
     await waitFor(() => ChromeMock.sentMessages.some(m => m.action === terminalAction),
-      { timeout: 8000, label: `${terminalAction} report` });
+      { timeout, label: `${terminalAction} report` });
     return ChromeMock.sentMessages.find(m => m.action === terminalAction);
   }
 
@@ -267,6 +267,95 @@ describe('content.js quality report bookkeeping', function() {
         assertEqual(r.failures.images.length, 1);
         assertEqual(r.failures.images[0], 'images/gone.png');
       }, '9787000000004');
+    });
+  });
+
+  it('records stylesheet and CSS background-image failures', async function() {
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'CSS Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return mockResponse({ jsonBody: { results: [
+          { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
+          { full_path: 'styles/good.css', kind: 'stylesheet', media_type: 'text/css' },
+          { full_path: 'styles/bad.css', kind: 'stylesheet', media_type: 'text/css' },
+        ], next: null } });
+      }
+      if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body {}' });
+      if (url.includes('/files/styles/good.css')) {
+        return mockResponse({ textBody: 'body { background: url(../images/bg-gone.png); }' });
+      }
+      if (url.includes('/files/styles/bad.css')) return mockResponse({ ok: false, status: 500 });
+      if (url.includes('/files/ch1.xhtml')) return mockResponse({ textBody: TEST_CHAPTER_XHTML });
+      return mockResponse({ ok: false, status: 404 });
+    };
+    await withNoRetries(async () => {
+      await withPatchedEnv(fetchMock, async () => {
+        const r = (await runDownload('rep-6')).report;
+        assertEqual(r.counts.cssFailed, 1, 'the failed stylesheet must be counted');
+        assertEqual(r.failures.css[0], 'styles/bad.css');
+        assertEqual(r.counts.imagesFailed, 1, 'a CSS background image failure is terminal');
+        assertEqual(r.failures.images[0], '../images/bg-gone.png');
+      }, '9787000000012');
+    });
+  });
+
+  it('aborts to downloadError when the session expires mid-image-download', async function() {
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Session Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return mockResponse({ jsonBody: { results: [
+          { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
+          { full_path: 'images/fig1.png', kind: 'image', media_type: 'image/png' },
+        ], next: null } });
+      }
+      if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body {}' });
+      if (url.includes('images/fig1.png')) return mockResponse({ ok: false, status: 401 });
+      if (url.includes('/files/ch1.xhtml')) return mockResponse({ textBody: TEST_CHAPTER_XHTML });
+      return mockResponse({ ok: false, status: 404 });
+    };
+    await withPatchedEnv(fetchMock, async () => {
+      const msg = await runDownload('rep-7', 'downloadError');
+      assertEqual(msg.errorKind, 'session',
+        'an expired session must abort the download, not be bookkept as a failed image');
+      assertContains(msg.error, 'Session expired');
+      assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        'must not complete with an expired session');
+    }, '9787000000013');
+  });
+
+  it('caps failure detail at 50 per category while totals stay exact', async function() {
+    const imageEntries = [];
+    for (let i = 0; i < 52; i++) {
+      imageEntries.push({ full_path: `images/gone_${i}.png`, kind: 'image', media_type: 'image/png' });
+    }
+    const fetchMock = async (url) => {
+      url = String(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Cap Book', authors: ['A'] }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return mockResponse({ jsonBody: { results: [
+          { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
+          ...imageEntries,
+        ], next: null } });
+      }
+      if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body {}' });
+      if (url.includes('/files/ch1.xhtml')) return mockResponse({ textBody: TEST_CHAPTER_XHTML });
+      return mockResponse({ ok: false, status: 404 });
+    };
+    await withNoRetries(async () => {
+      await withPatchedEnv(fetchMock, async () => {
+        // 52 images -> 26 phase-1 batches with 500ms pacing: allow ~25s
+        const r = (await runDownload('rep-8', 'downloadComplete', 25000)).report;
+        assertEqual(r.counts.imagesFailed, 52, 'the total must stay exact beyond the cap');
+        assertEqual(r.failures.images.length, 50, 'detail must cap at 50 entries');
+      }, '9787000000014');
     });
   });
 

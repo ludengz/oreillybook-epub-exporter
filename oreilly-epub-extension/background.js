@@ -208,9 +208,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           await chrome.tabs.sendMessage(targetTabId, { action: 'startDownload', attemptId });
         } catch (err) {
-          // Content script unreachable (e.g. extension reloaded, page not refreshed):
-          // roll back so the UI is not stuck in a downloading state forever
-          await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null, attemptId: null });
+          // Content script unreachable (e.g. extension reloaded, page not
+          // refreshed): roll back so the UI is not stuck in a downloading
+          // state forever — including the tab's prior report, which was
+          // cleared for a download that never actually started
+          await setState({
+            status: 'idle', progress: null, error: null,
+            downloadingTabId: null, attemptId: null,
+            reportByTab: st.reportByTab,
+          });
           sendResponse({ ok: false, reason: 'content_script_unreachable' });
           return;
         }
@@ -318,9 +324,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }).catch(() => {});
         // Generic failure notification (the old session-expiry special case
         // is merged here). Cancel sends no downloadError, so never notifies.
+        // errorKind is the source of truth; the substring check only covers
+        // messages from an older content script during a dev reload.
         const errorTitle = message.errorKind === 'validation'
           ? 'Download blocked: EPUB integrity error'
-          : message.error && message.error.includes('Session expired')
+          : message.errorKind === 'session'
+            || (message.error && message.error.includes('Session expired'))
             ? 'Session expired'
             : 'Download failed';
         await notifyTerminal(st.downloadingTabId, errorTitle, message.error || 'Unknown error');

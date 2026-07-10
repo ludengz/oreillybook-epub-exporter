@@ -170,6 +170,23 @@ describe('background.js attempt guards and stable complete state', function() {
     assertEqual(state.reportByTab[5].outcome, 'error');
   });
 
+  it('preserves the tab\'s prior report when the content script is unreachable', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: {}, reportByTab: { 5: { bookTitle: 'Kept' } },
+    } });
+    ChromeMock.clearBadgeEvents();
+    ChromeMock.setTabsSendMessage(async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    });
+    const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'startDownload', tabId: 5 });
+    assert(response && response.ok === false, 'start must fail');
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'idle', 'state must roll back');
+    assert(state.reportByTab[5] && state.reportByTab[5].bookTitle === 'Kept',
+      'a download that never started must not destroy the previous report');
+  });
+
   it('getState returns the active tab\'s report and null for other tabs', async function() {
     ChromeMock.resetStorage({ state: {
       status: 'complete', progress: null, error: null, downloadingTabId: null,

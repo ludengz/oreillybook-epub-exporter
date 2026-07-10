@@ -175,14 +175,17 @@ const EpubBuilder = {
     manifestItems.push('    <item id="nav" href="toc.xhtml" media-type="application/xhtml+xml" properties="nav"/>');
     manifestItems.push('    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>');
 
+    // hrefs carry source-derived filenames: XML-escape them so a legal
+    // filename containing & or " yields a well-formed OPF instead of a
+    // parse failure (which the packaging integrity gate would treat as fatal)
     cssFiles.forEach(f => {
       const id = uniqueId(`css-${this._sanitizeId(f)}`);
-      manifestItems.push(`    <item id="${id}" href="Styles/${f}" media-type="text/css"/>`);
+      manifestItems.push(`    <item id="${id}" href="Styles/${this._escapeXml(f)}" media-type="text/css"/>`);
     });
 
     chapters.forEach(ch => {
       const id = uniqueId(this._sanitizeId(ch.filename));
-      manifestItems.push(`    <item id="${id}" href="Text/${ch.filename}" media-type="application/xhtml+xml"/>`);
+      manifestItems.push(`    <item id="${id}" href="Text/${this._escapeXml(ch.filename)}" media-type="application/xhtml+xml"/>`);
       spineItems.push(`    <itemref idref="${id}"/>`);
     });
 
@@ -192,7 +195,7 @@ const EpubBuilder = {
       const isCover = (img === coverImageFilename);
       if (isCover) coverId = id;
       const props = isCover ? ' properties="cover-image"' : '';
-      manifestItems.push(`    <item id="${id}" href="Images/${img}" media-type="${this._mimeType(img)}"${props}/>`);
+      manifestItems.push(`    <item id="${id}" href="Images/${this._escapeXml(img)}" media-type="${this._mimeType(img)}"${props}/>`);
     });
 
     // EPUB2-style cover meta for readers that ignore properties="cover-image"
@@ -278,7 +281,7 @@ ${navPoints}
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>${this._escapeXml(title)}</title></head>
 <body style="margin:0;padding:0;text-align:center;">
-  <img src="../Images/${coverImageFilename}" alt="${this._escapeXml(title)}" style="max-width:100%;max-height:100%;"/>
+  <img src="../Images/${this._escapeXml(coverImageFilename)}" alt="${this._escapeXml(title)}" style="max-width:100%;max-height:100%;"/>
 </body>
 </html>`;
   },

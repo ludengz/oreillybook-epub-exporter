@@ -81,9 +81,12 @@
     document.getElementById('report-header').className =
       'report-header ' + (clean ? 'report-ok' : 'report-warn');
     document.getElementById('report-icon').textContent = clean ? '✓' : '⚠';
+    // A download can be warn-worthy with zero hard failures (missing cover,
+    // fallback metadata, skipped integrity check) — never claim "0 issues"
     document.getElementById('report-headline').textContent = isError
       ? 'Download failed — partial report'
       : clean ? 'Everything downloaded'
+      : problemCount === 0 ? 'Downloaded with notes'
       : `${problemCount} issue${problemCount === 1 ? '' : 's'} found`;
     document.getElementById('report-book-title').textContent =
       `Download report for "${report.bookTitle || 'Unknown'}"`;
@@ -91,8 +94,10 @@
     const body = document.getElementById('report-body');
     body.textContent = '';
     line(body, `${counts.chaptersOk || 0} chapters OK · ${counts.imagesOk || 0} images OK`, 'report-summary');
-    if (report.validated === false) line(body, 'Integrity check was skipped for this file.', 'report-notice');
-    if (counts.metadataFromApi === false) line(body, 'Book metadata came from a page fallback.', 'report-notice');
+    // Error-path partial reports hardcode these flags to false — the notices
+    // would be misleading there, so they render for completed downloads only
+    if (report.validated === false && !isError) line(body, 'Integrity check was skipped for this file.', 'report-notice');
+    if (counts.metadataFromApi === false && !isError) line(body, 'Book metadata came from a page fallback.', 'report-notice');
     if (counts.coverPresent === false && !isError) line(body, 'No cover image could be found.', 'report-notice');
 
     const expand = !clean;

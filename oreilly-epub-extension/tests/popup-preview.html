@@ -8,9 +8,9 @@
 </head>
 <body>
   <!-- Dev harness: renders the real popup.js against fixture states, no
-       extension load needed. Pick a fixture via ?scenario=clean|issues|
-       validation-error|error|ready. The markup below mirrors popup.html's
-       body and must be kept in sync with it. -->
+       extension load needed. Pick a fixture via ?scenario=clean|notes|
+       issues|validation-error|error|ready. The markup below mirrors
+       popup.html's body and must be kept in sync with it. -->
 
   <div class="header">
     <div class="logo">O</div>
@@ -116,8 +116,14 @@
       },
     };
 
+    const notesReport = Object.assign({}, cleanReport, {
+      attemptId: 'a4',
+      counts: Object.assign({}, cleanReport.counts, { coverPresent: false, metadataFromApi: false }),
+    });
+
     const scenarios = {
       clean: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: cleanReport },
+      notes: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: notesReport },
       issues: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: issuesReport },
       'validation-error': validationErrorState,
       error: { status: 'error', downloadingTabId: 5, progress: null, error: 'Session expired. Please log in to O\'Reilly and try again.', bookInfo, report: null },
