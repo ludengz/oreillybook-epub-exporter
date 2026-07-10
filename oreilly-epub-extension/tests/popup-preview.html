@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Popup preview harness</title>
+  <link rel="stylesheet" href="../popup.css">
+  <style>body { margin: 8px auto; border: 1px solid #ddd; }</style>
+</head>
+<body>
+  <!-- Dev harness: renders the real popup.js against fixture states, no
+       extension load needed. Pick a fixture via ?scenario=clean|notes|
+       issues|validation-error|error|ready. The markup below mirrors
+       popup.html's body and must be kept in sync with it. -->
+
+  <div class="header">
+    <div class="logo">O</div>
+    <span class="title">O'Reilly → EPUB</span>
+  </div>
+
+  <div id="state-not-oreilly" class="state" style="display:none;">
+    <div class="notice">
+      <div class="notice-icon">📖</div>
+      <div class="notice-text">Navigate to an O'Reilly book page to get started</div>
+    </div>
+  </div>
+
+  <div id="state-ready" class="state" style="display:none;">
+    <div class="book-info">
+      <div id="book-title" class="book-title"></div>
+      <div id="book-authors" class="book-authors"></div>
+    </div>
+    <button id="btn-download" class="btn-primary">📥 Download EPUB</button>
+  </div>
+
+  <div id="state-downloading" class="state" style="display:none;">
+    <div class="book-info">
+      <div class="book-title-small">Downloading...</div>
+      <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+      <div id="progress-text" class="progress-text"></div>
+    </div>
+    <button id="btn-cancel" class="btn-secondary">Cancel</button>
+  </div>
+
+  <div id="state-downloading-other" class="state" style="display:none;">
+    <div class="book-info">
+      <div id="book-title-other" class="book-title"></div>
+      <div id="book-authors-other" class="book-authors"></div>
+    </div>
+    <div class="notice">
+      <div class="notice-text">Another book is currently downloading:</div>
+      <div id="downloading-other-title" class="book-title-small"></div>
+    </div>
+    <button class="btn-primary" disabled>📥 Download EPUB</button>
+  </div>
+
+  <div id="state-report" class="state" style="display:none;">
+    <div id="report-header" class="report-header">
+      <span id="report-icon"></span>
+      <span id="report-headline"></span>
+    </div>
+    <div id="report-book-title" class="book-title-small"></div>
+    <div id="report-body" class="report-body"></div>
+    <button id="btn-redownload" class="btn-primary">📥 Re-download book</button>
+    <div id="redownload-note" class="progress-text" style="display:none;"></div>
+  </div>
+
+  <div id="state-error" class="state" style="display:none;">
+    <div class="notice error">
+      <div class="notice-text" id="error-text"></div>
+    </div>
+    <div id="error-report-counts" class="progress-text" style="display:none;"></div>
+    <details id="error-details" style="display:none;">
+      <summary>Details</summary>
+      <pre id="error-details-text"></pre>
+    </details>
+    <button id="btn-copy-error" class="btn-primary" style="display:none;">Copy error details</button>
+    <button id="btn-retry" class="btn-primary">Retry</button>
+    <div id="retry-note" class="progress-text" style="display:none;"></div>
+  </div>
+
+  <script>
+  // Chrome API stub feeding popup.js a fixture getState response
+  (function() {
+    'use strict';
+
+    const bookInfo = { title: 'Designing Data-Intensive Applications', authors: ['Martin Kleppmann'] };
+    const cleanReport = {
+      attemptId: 'a1', isbn: '9781492056348', bookTitle: bookInfo.title,
+      timestamp: '2026-07-09T12:00:00Z', outcome: 'complete', validated: true,
+      validationWarnings: [], validationViolations: [],
+      counts: { chaptersOk: 42, chaptersPlaceholder: 0, imagesOk: 118, imagesFailed: 0, cssFailed: 0, coverPresent: true, metadataFromApi: true },
+      failures: { chapters: [], images: [], css: [] },
+    };
+    const issuesReport = {
+      attemptId: 'a2', isbn: '9781492056348', bookTitle: bookInfo.title,
+      timestamp: '2026-07-09T12:00:00Z', outcome: 'complete', validated: false,
+      validationWarnings: ['Chapter does not parse as XHTML: OEBPS/Text/chapter_07.xhtml'],
+      validationViolations: [],
+      counts: { chaptersOk: 40, chaptersPlaceholder: 2, imagesOk: 110, imagesFailed: 8, cssFailed: 1, coverPresent: false, metadataFromApi: false },
+      failures: {
+        chapters: [{ path: 'ch03.xhtml', chapter: 3 }, { path: 'ch09.xhtml', chapter: 9 }],
+        images: ['images/fig_0301.png', 'images/fig_0904.png', 'https://cdn.oreillystatic.com/x/y/diagram-with-a-rather-long-name.png'],
+        css: ['styles/print-overrides.css'],
+      },
+    };
+    const validationErrorState = {
+      status: 'error', downloadingTabId: 5, progress: null,
+      error: 'EPUB integrity check failed: Manifest file missing from ZIP: OEBPS/Images/ghost.png',
+      bookInfo,
+      report: {
+        attemptId: 'a3', isbn: '9781492056348', bookTitle: bookInfo.title,
+        outcome: 'error', validated: false, validationWarnings: [],
+        validationViolations: ['Manifest file missing from ZIP: OEBPS/Images/ghost.png'],
+        counts: { chaptersOk: 42, chaptersPlaceholder: 0, imagesOk: 117, imagesFailed: 1, cssFailed: 0, coverPresent: false, metadataFromApi: true },
+        failures: { chapters: [], images: ['images/ghost.png'], css: [] },
+      },
+    };
+
+    const notesReport = Object.assign({}, cleanReport, {
+      attemptId: 'a4',
+      counts: Object.assign({}, cleanReport.counts, { coverPresent: false, metadataFromApi: false }),
+    });
+
+    const scenarios = {
+      clean: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: cleanReport },
+      notes: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: notesReport },
+      issues: { status: 'complete', downloadingTabId: null, progress: null, error: null, bookInfo, report: issuesReport },
+      'validation-error': validationErrorState,
+      error: { status: 'error', downloadingTabId: 5, progress: null, error: 'Session expired. Please log in to O\'Reilly and try again.', bookInfo, report: null },
+      ready: { status: 'idle', downloadingTabId: null, progress: null, error: null, bookInfo, report: null },
+    };
+    const scenario = new URLSearchParams(location.search).get('scenario') || 'clean';
+    const state = scenarios[scenario] || scenarios.clean;
+
+    window.chrome = {
+      runtime: {
+        lastError: undefined,
+        connect() { return { postMessage() {}, onMessage: { addListener() {} }, onDisconnect: { addListener() {} } }; },
+        sendMessage(msg, cb) { if (msg.action === 'getState' && cb) cb(state); else if (cb) cb({ ok: true }); },
+        onMessage: { addListener() {} },
+      },
+      tabs: {
+        query(q, cb) { cb([{ id: 5 }]); },
+        sendMessage(tabId, msg, cb) { cb({ isbn: state.report ? state.report.isbn : null }); },
+      },
+    };
+  })();
+  </script>
+  <script src="../popup.js"></script>
+</body>
+</html>

@@ -5,6 +5,9 @@ A Chrome extension that converts O'Reilly Learning books into EPUB format with a
 ## Features
 
 - One-click conversion of entire O'Reilly books to EPUB 3.0
+- Quality report after every download — missing chapters, failed images, and stylesheet problems are counted and listed in the popup instead of silently degrading, with a one-click re-download
+- Built-in integrity check before packaging (OPF ↔ ZIP ↔ spine reconciliation) — structurally broken EPUBs are blocked instead of delivered
+- System notifications on completion and failure (clicking one jumps back to the book's tab)
 - Rich book metadata (language, publisher, subjects, description, publication date) for Calibre and e-reader libraries
 - Cover always included: filename detection with an automatic API fallback for books without a conventionally named cover image
 - Unicode-safe filenames — CJK and accented book titles are preserved instead of stripped
@@ -64,6 +67,7 @@ oreilly-epub-extension/
 │   ├── jszip.min.js       # EPUB packaging
 │   ├── path-utils.js      # Pure helpers: path resolution, filename sanitizing, host allowlist
 │   ├── epub-builder.js    # EPUB structure generation (OPF, NCX, TOC) + metadata normalization
+│   ├── epub-validator.js  # Pre-package integrity gate (manifest/ZIP/spine reconciliation)
 │   ├── fetcher.js         # HTTP fetching with retry, backoff, rate limit handling
 │   └── eink-optimizer.js  # E-ink code block optimization
 ├── styles/

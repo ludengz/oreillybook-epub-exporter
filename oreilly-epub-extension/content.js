@@ -3,6 +3,11 @@
 
   let abortController = null;
 
+  // Generation id of the running download, issued by the service worker with
+  // the startDownload command. Every lifecycle message carries it so the SW
+  // can drop messages that lost a race against cancel or a newer download.
+  let currentAttemptId = null;
+
   // Extract book title from document.title which has format "ChapterTitle | BookTitle"
   function extractBookTitle() {
     const parts = document.title.split(' | ');
@@ -96,7 +101,7 @@
 
   // Listen for commands
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'startDownload') startDownload();
+    if (message.action === 'startDownload') startDownload(message.attemptId);
     else if (message.action === 'cancelDownload') cancelDownload();
     else if (message.action === 'redetectBook') {
       // Re-runs detection: groundwork for SPA route changes, and the test
@@ -119,6 +124,90 @@
       abortController.abort();
       abortController = null;
     }
+  }
+
+  // --- Quality report bookkeeping -------------------------------------------
+  // Every terminal failure during a download is recorded here (silent
+  // degradation is the problem this exists to fix). Detail lists are capped
+  // so the report stays small in chrome.storage.session; totals stay exact.
+  const FAILURE_DETAIL_CAP = 50;
+
+  function createFailureLog() {
+    return {
+      chapters: [],       // { path, chapter } — placeholder chapters (capped)
+      chaptersTotal: 0,
+      images: [],         // stripped source URLs/paths (capped)
+      imagesTotal: 0,
+      imagesSeen: new Set(),
+      css: [],            // stylesheet paths (capped)
+      cssTotal: 0,
+      cssSeen: new Set(),
+      chaptersOk: 0,      // successfully processed chapters
+      imagesOk: 0,        // unique image files actually written to the ZIP
+    };
+  }
+
+  function recordChapterFailure(log, path, chapterNum) {
+    log.chaptersTotal++;
+    if (log.chapters.length < FAILURE_DETAIL_CAP) log.chapters.push({ path, chapter: chapterNum });
+  }
+
+  // Deduplicated by stripped source: imageMap caches successes only, so the
+  // same failing src recurs in every chapter that references it
+  function recordImageFailure(log, src) {
+    const key = Fetcher.stripQueryAndHash(String(src));
+    if (log.imagesSeen.has(key)) return;
+    log.imagesSeen.add(key);
+    log.imagesTotal++;
+    if (log.images.length < FAILURE_DETAIL_CAP) log.images.push(key);
+  }
+
+  function recordCssFailure(log, path) {
+    if (log.cssSeen.has(path)) return;
+    log.cssSeen.add(path);
+    log.cssTotal++;
+    if (log.css.length < FAILURE_DETAIL_CAP) log.css.push(path);
+  }
+
+  // A fatal integrity violation blocks delivery: the error carries the full
+  // violation list; the user-facing message caps at three entries.
+  function validationError(violations) {
+    const summary = violations.slice(0, 3).join('; ');
+    const suffix = violations.length > 3 ? ` (+${violations.length - 3} more)` : '';
+    const err = new Error(`EPUB integrity check failed: ${summary}${suffix}`);
+    err.validationViolations = violations;
+    return err;
+  }
+
+  // Assemble the per-attempt quality report that rides the terminal
+  // lifecycle message (downloadComplete or downloadError with the partial
+  // log). The SW snapshots it into reportByTab keyed by the sender tab.
+  function buildReport(log, { isbn, bookTitle, outcome, errorKind, coverPresent, metadataFromApi, validated, validationWarnings, validationViolations }) {
+    return {
+      attemptId: currentAttemptId,
+      isbn,
+      bookTitle,
+      timestamp: new Date().toISOString(),
+      outcome,
+      errorKind: errorKind || null,
+      validated: !!validated,
+      validationWarnings: validationWarnings || [],
+      validationViolations: validationViolations || [],
+      counts: {
+        chaptersOk: log.chaptersOk,
+        chaptersPlaceholder: log.chaptersTotal,
+        imagesOk: log.imagesOk,
+        imagesFailed: log.imagesTotal,
+        cssFailed: log.cssTotal,
+        coverPresent: !!coverPresent,
+        metadataFromApi: !!metadataFromApi,
+      },
+      failures: {
+        chapters: log.chapters,
+        images: log.images,
+        css: log.css,
+      },
+    };
   }
 
   // Fetch image via background service worker (CORS proxy). Resolves with
@@ -203,15 +292,17 @@
     }
   }
 
-  async function startDownload() {
+  async function startDownload(attemptId) {
     if (abortController) return; // Already downloading
     const isbn = Fetcher.extractIsbn(window.location.href);
     if (!isbn) return;
+    currentAttemptId = attemptId || null;
 
     const controller = new AbortController();
     abortController = controller;
     const signal = controller.signal;
     const zip = new JSZip();
+    const failureLog = createFailureLog();
 
     try {
       // Fetch all pages of the file manifest (API is paginated, ~20 per page)
@@ -257,7 +348,7 @@
         console.warn(`Large book detected: ${chapterFiles.length} chapters. This may take a while.`);
       }
 
-      await buildEpub(zip, isbn, chapterFiles, cssFiles, imageFiles, signal);
+      await buildEpub(zip, isbn, chapterFiles, cssFiles, imageFiles, signal, failureLog);
 
     } catch (err) {
       if (err.name === 'AbortError') {
@@ -265,11 +356,28 @@
         return;
       }
       console.error('Download failed:', err);
+      // The partial report travels with the error so the bookkeeping
+      // accumulated before the failure is not lost
+      const errorKind = err.validationViolations ? 'validation'
+        : err.message === 'SESSION_EXPIRED' ? 'session'
+        : 'download';
       chrome.runtime.sendMessage({
         action: 'downloadError',
+        attemptId: currentAttemptId,
         error: err.message === 'SESSION_EXPIRED'
           ? 'Session expired. Please log in to O\'Reilly and try again.'
           : err.message,
+        errorKind,
+        report: buildReport(failureLog, {
+          isbn,
+          bookTitle: extractBookTitle(),
+          outcome: 'error',
+          errorKind,
+          coverPresent: false,
+          metadataFromApi: false,
+          validated: false,
+          validationViolations: err.validationViolations,
+        }),
       });
     } finally {
       // Reset the reentry guard on every exit path (success, error, cancel).
@@ -278,7 +386,7 @@
     }
   }
 
-  async function buildEpub(zip, isbn, chapterFiles, cssFiles, imageFiles, signal) {
+  async function buildEpub(zip, isbn, chapterFiles, cssFiles, imageFiles, signal, log) {
     const totalChapters = chapterFiles.length;
 
     zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
@@ -314,8 +422,11 @@
             const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
             zip.file(`OEBPS/Images/${imgName}`, await imgRes.arrayBuffer());
             cssImageMap[cssImgUrl] = imgName;
+            log.imagesOk++;
           } catch (e) {
+            if (e.name === 'AbortError' || e.message === 'SESSION_EXPIRED') throw e;
             console.warn(`CSS background image fetch failed: ${cssImgUrl}`, e);
+            recordImageFailure(log, cssImgUrl);
           }
         }
 
@@ -325,7 +436,11 @@
         }
 
         zip.file(`OEBPS/Styles/${filename}`, cssText);
-      } catch (e) { console.warn(`CSS fetch failed: ${cssFile.path}`, e); }
+      } catch (e) {
+        if (e.name === 'AbortError' || e.message === 'SESSION_EXPIRED') throw e;
+        console.warn(`CSS fetch failed: ${cssFile.path}`, e);
+        recordCssFailure(log, cssFile.path);
+      }
     }
 
     // --- Phase 1: Pre-download all manifest images via API (same-origin, no CORS) ---
@@ -348,13 +463,17 @@
           zip.file(`OEBPS/Images/${imgFilename}`, await res.arrayBuffer());
           manifestImageMap[normalizedPath] = imgFilename;
           downloadedImageCount++;
+          log.imagesOk++;
         } catch (e) {
+          if (e.name === 'AbortError' || e.message === 'SESSION_EXPIRED') throw e;
           console.warn(`Manifest image fetch failed: ${imgFile.path}`, e);
+          recordImageFailure(log, imgFile.path);
         }
       }));
 
       chrome.runtime.sendMessage({
         action: 'progress',
+        attemptId: currentAttemptId,
         chapter: 0,
         totalChapters,
         images: downloadedImageCount,
@@ -402,6 +521,7 @@
 </html>`;
           zip.file(`OEBPS/Text/${filename}`, placeholder);
           chapters.push({ filename, title: `Chapter ${chapterNum} (unavailable)` });
+          recordChapterFailure(log, chapterOriginalPath, chapterNum);
           completedChapters++;
           continue;
         }
@@ -457,8 +577,11 @@
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
               downloadedImageCount++;
+              log.imagesOk++;
               continue;
             } catch (e) {
+              if (e.name === 'AbortError' || e.message === 'SESSION_EXPIRED') throw e;
+              // Non-terminal: absolute URLs still fall through to Strategy 4
               console.warn(`API image fetch failed: ${apiUrl}`, e);
             }
           }
@@ -472,21 +595,26 @@
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
               downloadedImageCount++;
+              log.imagesOk++;
             } catch (e) {
               console.warn(`Image fetch failed (all strategies): ${imgSrc}`, e);
+              recordImageFailure(log, imgSrc);
             }
           } else {
             console.warn(`Image not found in manifest or API: ${imgSrc}`);
+            recordImageFailure(log, imgSrc);
           }
         }
 
         xhtml = EinkOptimizer.processChapter(xhtml, chapterImageMap);
         zip.file(`OEBPS/Text/${filename}`, xhtml);
         chapters.push({ filename, title: chapterTitle });
+        log.chaptersOk++;
 
         completedChapters++;
         chrome.runtime.sendMessage({
           action: 'progress',
+          attemptId: currentAttemptId,
           chapter: completedChapters,
           totalChapters,
           images: downloadedImageCount,
@@ -534,6 +662,7 @@
       if (fallbackCover) {
         allImageFiles.push(fallbackCover);
         coverImage = fallbackCover;
+        log.imagesOk++;
       }
     }
     if (coverImage) {
@@ -545,11 +674,44 @@
     // landed during the cover fetch must not produce a completed download
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    zip.file('OEBPS/content.opf', EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage));
+    const opfXml = EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage);
+    zip.file('OEBPS/content.opf', opfXml);
     zip.file('OEBPS/toc.xhtml', EpubBuilder.generateTocXhtml(metadata.title, chapters));
     zip.file('OEBPS/toc.ncx', EpubBuilder.generateTocNcx(isbn, metadata.title, chapters));
 
+    // Pre-package integrity gate: fatal violations block delivery (a
+    // three-way OPF/ZIP/spine inconsistency is a code bug); warnings ride
+    // the report. The validator's own crashes fail open — a validator bug
+    // must never block an otherwise good download.
+    let validated = true;
+    const validationWarnings = [];
+    try {
+      const structural = await EpubValidator.validateStructure(zip, opfXml);
+      if (structural.fatal.length) throw validationError(structural.fatal);
+      validationWarnings.push(...structural.warnings);
+    } catch (err) {
+      if (err.name === 'AbortError' || err.validationViolations) throw err;
+      console.warn('EPUB validator self-error (failing open):', err);
+      validated = false;
+    }
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
     const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
+
+    // Physical phase: confirm the generated bytes really lead with a stored
+    // mimetype entry (what readers sniff), not just the JSZip bookkeeping
+    if (validated) {
+      try {
+        const physical = await EpubValidator.validateBlob(blob);
+        if (physical.fatal.length) throw validationError(physical.fatal);
+        validationWarnings.push(...physical.warnings);
+      } catch (err) {
+        if (err.name === 'AbortError' || err.validationViolations) throw err;
+        console.warn('EPUB validator self-error (failing open):', err);
+        validated = false;
+      }
+    }
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     const url = URL.createObjectURL(blob);
     const filenameStem = PathUtils.sanitizeFilename(bookTitle, `book-${isbn}`);
     const a = document.createElement('a');
@@ -560,7 +722,16 @@
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-    chrome.runtime.sendMessage({ action: 'downloadComplete' });
+    const report = buildReport(log, {
+      isbn,
+      bookTitle,
+      outcome: 'complete',
+      coverPresent: !!coverImage,
+      metadataFromApi: !!meta.fromApi,
+      validated,
+      validationWarnings,
+    });
+    chrome.runtime.sendMessage({ action: 'downloadComplete', attemptId: currentAttemptId, report });
   }
 
   detectBook();

@@ -41,6 +41,320 @@ describe('background.js startDownload state management', function() {
   });
 });
 
+describe('background.js attempt guards and stable complete state', function() {
+  // Start a download on the given tab; returns the attemptId the SW issued
+  async function startAttempt(tabId, initialState) {
+    ChromeMock.resetStorage(initialState ? { state: initialState } : {});
+    ChromeMock.clearBadgeEvents();
+    let sentAttemptId = null;
+    ChromeMock.setTabsSendMessage(async (id, msg) => { sentAttemptId = msg.attemptId; });
+    const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'startDownload', tabId });
+    assert(response && response.ok === true, `start failed: ${JSON.stringify(response)}`);
+    return sentAttemptId;
+  }
+  const sender = (tabId) => ({ tab: { id: tabId } });
+
+  it('issues an attemptId, stores it, and passes it to the content script', async function() {
+    const attemptId = await startAttempt(5);
+    assert(attemptId, 'startDownload command must carry an attemptId');
+    assertEqual(ChromeMock.getStorage().state.attemptId, attemptId,
+      'the issued attemptId must be stored in session state');
+  });
+
+  it('accepts progress from the current attempt and scopes the badge to the tab', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'progress', attemptId, chapter: 1, totalChapters: 3, images: 0, totalImages: 0 },
+      sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.progress && state.progress.chapter, 1);
+    const badge = ChromeMock.badgeEvents.find(e => e.kind === 'text' && e.text === '1/3');
+    assert(badge, 'progress badge expected');
+    assertEqual(badge.tabId, 5, 'badge must be scoped to the downloading tab');
+  });
+
+  it('drops progress with a stale attemptId after cancel (no status resurrection)', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'cancelDownload' });
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'progress', attemptId, chapter: 2, totalChapters: 3, images: 0, totalImages: 0 },
+      sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'idle', 'a late progress message must not resurrect downloading');
+    assertEqual(state.progress, null, 'stale progress payload must be dropped');
+  });
+
+  it('drops downloadComplete with a stale attemptId (cancel wins the race)', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'cancelDownload' });
+    ChromeMock.clearBadgeEvents();
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'idle', 'a late downloadComplete must not mint a complete state');
+    assert(!ChromeMock.badgeEvents.some(e => e.text === '✓'),
+      'no success badge after a cancelled attempt');
+  });
+
+  it('drops lifecycle messages whose sender is not the downloading tab', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'progress', attemptId, chapter: 1, totalChapters: 3, images: 0, totalImages: 0 },
+      sender(9));
+    assertEqual(ChromeMock.getStorage().state.progress, null,
+      'messages from the wrong tab must be dropped');
+  });
+
+  it('downloadComplete yields a stable complete state with a tab-scoped badge', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'complete');
+    assertEqual(state.downloadingTabId, null);
+    assertEqual(state.attemptId, null, 'no active attempt after completion');
+    const badge = ChromeMock.badgeEvents.find(e => e.kind === 'text' && e.text === '✓');
+    assert(badge, 'success badge expected');
+    assertEqual(badge.tabId, 5, 'success badge must be scoped to the completed tab');
+    // Stable: a fresh state read a beat later still reports complete
+    await new Promise(r => setTimeout(r, 50));
+    assertEqual(ChromeMock.getStorage().state.status, 'complete',
+      'complete must persist with no timer resetting it');
+  });
+
+  it('clears the starting tab\'s badge and old report when a new download begins', async function() {
+    await startAttempt(5, {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: {}, reportByTab: { 5: { attemptId: 'old' } },
+    });
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'downloading');
+    assert(!state.reportByTab[5], 'the starting tab\'s previous report must be replaced');
+    assert(ChromeMock.badgeEvents.some(e => e.kind === 'text' && e.text === '' && e.tabId === 5),
+      'the starting tab\'s stale badge must be cleared');
+  });
+
+  it('reportAck clears the badge for the given tab without touching state', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: {}, reportByTab: { 7: { attemptId: 'a' } },
+    } });
+    ChromeMock.clearBadgeEvents();
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'reportAck', tabId: 7 });
+    assert(ChromeMock.badgeEvents.some(e => e.kind === 'text' && e.text === '' && e.tabId === 7),
+      'ack must clear the tab badge');
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'complete', 'ack must not change status');
+    assert(state.reportByTab[7], 'ack must not delete the report');
+  });
+
+  it('snapshots the report from downloadComplete into reportByTab', async function() {
+    const attemptId = await startAttempt(5);
+    const report = { attemptId, bookTitle: 'Snap Book', outcome: 'complete', counts: { chaptersOk: 3 } };
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assert(state.reportByTab[5], 'report must be keyed by the sender tab');
+    assertEqual(state.reportByTab[5].bookTitle, 'Snap Book');
+    assertEqual(state.status, 'complete');
+  });
+
+  it('snapshots the partial report from downloadError into reportByTab', async function() {
+    const attemptId = await startAttempt(5);
+    const report = { attemptId, outcome: 'error', counts: { chaptersOk: 1 } };
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadError', attemptId, error: 'boom', report }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'error');
+    assert(state.reportByTab[5], 'error-terminated attempts must keep their partial report');
+    assertEqual(state.reportByTab[5].outcome, 'error');
+  });
+
+  it('preserves the tab\'s prior report when the content script is unreachable', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: {}, reportByTab: { 5: { bookTitle: 'Kept' } },
+    } });
+    ChromeMock.clearBadgeEvents();
+    ChromeMock.setTabsSendMessage(async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    });
+    const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'startDownload', tabId: 5 });
+    assert(response && response.ok === false, 'start must fail');
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'idle', 'state must roll back');
+    assert(state.reportByTab[5] && state.reportByTab[5].bookTitle === 'Kept',
+      'a download that never started must not destroy the previous report');
+  });
+
+  it('getState returns the active tab\'s report and null for other tabs', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: { 5: { title: 'B', authors: ['A'] } },
+      reportByTab: { 5: { bookTitle: 'B', outcome: 'complete' } },
+    } });
+    const forTab5 = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'getState', tabId: 5 });
+    assert(forTab5.report && forTab5.report.bookTitle === 'B', 'tab 5 must see its report');
+    const forTab6 = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'getState', tabId: 6 });
+    assertEqual(forTab6.report, null, 'tab 6 has no report');
+  });
+
+  it('getState tolerates legacy state objects without reportByTab', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'idle', progress: null, error: null, downloadingTabId: null,
+      bookInfoByTab: {},
+    } });
+    const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'getState', tabId: 5 });
+    assertEqual(response.report, null);
+  });
+
+  it('closing the report tab removes its report and residual complete status', async function() {
+    ChromeMock.resetStorage({ state: {
+      status: 'complete', progress: null, error: null, downloadingTabId: null,
+      attemptId: null, bookInfoByTab: { 7: { title: 'X' } }, reportByTab: { 7: { attemptId: 'a' } },
+    } });
+    await ChromeMock.fireTabRemoved(7);
+    const state = ChromeMock.getStorage().state;
+    assert(!state.reportByTab[7], 'report must be removed with its tab');
+    assert(!state.bookInfoByTab[7], 'book info must be removed with its tab');
+    assertEqual(state.status, 'idle', 'residual complete must reset when its tab closes');
+  });
+});
+
+describe('background.js terminal notifications', function() {
+  async function startAttempt(tabId) {
+    ChromeMock.resetStorage();
+    ChromeMock.clearNotificationEvents();
+    ChromeMock.clearFocusEvents();
+    let sentAttemptId = null;
+    ChromeMock.setTabsSendMessage(async (id, msg) => { sentAttemptId = msg.attemptId; });
+    const response = await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'startDownload', tabId });
+    assert(response && response.ok === true, `start failed: ${JSON.stringify(response)}`);
+    return sentAttemptId;
+  }
+  const sender = (tabId) => ({ tab: { id: tabId } });
+  const REPORT = {
+    bookTitle: 'Notify Book',
+    counts: { chaptersOk: 4, imagesOk: 7, chaptersPlaceholder: 0, imagesFailed: 1, cssFailed: 0 },
+    validationWarnings: [],
+  };
+
+  it('notifies with the report summary when no popup is connected', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    assertEqual(ChromeMock.notificationEvents.length, 1, 'exactly one notification');
+    const n = ChromeMock.notificationEvents[0];
+    assertContains(n.title, 'Notify Book');
+    assertContains(n.message, '4 chapters, 7 images');
+    assertContains(n.message, '1 issue(s)');
+    const map = ChromeMock.getStorage().notificationTabs;
+    assertEqual(map[n.id], 5, 'notification id must map to the originating tab');
+  });
+
+  it('suppresses the notification when a popup is viewing the affected tab', async function() {
+    const attemptId = await startAttempt(5);
+    const port = ChromeMock.connectPopup(5);
+    try {
+      await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+        { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+      assertEqual(ChromeMock.notificationEvents.length, 0,
+        'a popup showing the affected tab suppresses the notification');
+    } finally {
+      port.disconnect();
+    }
+  });
+
+  it('notifies when the popup is viewing a different tab', async function() {
+    const attemptId = await startAttempt(5);
+    const port = ChromeMock.connectPopup(9);
+    try {
+      await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+        { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+      assertEqual(ChromeMock.notificationEvents.length, 1,
+        'suppression is tab-scoped — a popup on another tab must not swallow the signal');
+    } finally {
+      port.disconnect();
+    }
+  });
+
+  it('notifies after the popup port disconnects', async function() {
+    const attemptId = await startAttempt(5);
+    ChromeMock.connectPopup(5).disconnect();
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    assertEqual(ChromeMock.notificationEvents.length, 1, 'closed popup means notify');
+  });
+
+  it('sends exactly one notification for a session-expiry error', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, {
+      action: 'downloadError', attemptId, errorKind: 'session',
+      error: 'Session expired. Please log in to O\'Reilly and try again.',
+    }, sender(5));
+    assertEqual(ChromeMock.notificationEvents.length, 1,
+      'the old special case must not double up with the generic path');
+    assertEqual(ChromeMock.notificationEvents[0].title, 'Session expired');
+  });
+
+  it('uses a distinct title for validation-blocked downloads', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, {
+      action: 'downloadError', attemptId, errorKind: 'validation',
+      error: 'EPUB integrity check failed: x',
+    }, sender(5));
+    assertEqual(ChromeMock.notificationEvents.length, 1);
+    assertContains(ChromeMock.notificationEvents[0].title, 'integrity');
+  });
+
+  it('sends no notification for a stale downloadComplete after cancel', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER, { action: 'cancelDownload' });
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    assertEqual(ChromeMock.notificationEvents.length, 0,
+      'a cancelled attempt must never produce a success notification');
+  });
+
+  it('focuses the originating window and tab when a notification is clicked', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    const n = ChromeMock.notificationEvents[0];
+    ChromeMock.clearFocusEvents();
+    await ChromeMock.fireNotificationClicked(n.id);
+    assert(ChromeMock.focusEvents.some(e => e.kind === 'window' && e.windowId === 100 && e.focused === true),
+      'the tab\'s current window must be focused');
+    assert(ChromeMock.focusEvents.some(e => e.kind === 'tab' && e.tabId === 5 && e.active === true),
+      'the originating tab must be activated');
+  });
+
+  it('is a graceful no-op when the clicked notification\'s tab is gone', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    const n = ChromeMock.notificationEvents[0];
+    ChromeMock.clearFocusEvents();
+    ChromeMock.setTabsGet(async () => { throw new Error('No tab with id'); });
+    try {
+      await ChromeMock.fireNotificationClicked(n.id);
+      assertEqual(ChromeMock.focusEvents.length, 0, 'no focus calls for a missing tab');
+    } finally {
+      ChromeMock.setTabsGet(async (tabId) => ({ id: tabId, windowId: 100 }));
+    }
+  });
+
+  it('drops the map entry when its notification closes', async function() {
+    const attemptId = await startAttempt(5);
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report: REPORT }, sender(5));
+    const n = ChromeMock.notificationEvents[0];
+    await ChromeMock.fireNotificationClosed(n.id);
+    const map = ChromeMock.getStorage().notificationTabs;
+    assert(!map || map[n.id] == null, 'closed notifications must not leak map entries');
+  });
+});
+
 describe('background.js fetchImage proxy', function() {
   async function withPatchedFetch(impl, body) {
     const orig = window.fetch;
