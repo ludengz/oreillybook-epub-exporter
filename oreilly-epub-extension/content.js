@@ -3,6 +3,11 @@
 
   let abortController = null;
 
+  // Generation id of the running download, issued by the service worker with
+  // the startDownload command. Every lifecycle message carries it so the SW
+  // can drop messages that lost a race against cancel or a newer download.
+  let currentAttemptId = null;
+
   // Extract book title from document.title which has format "ChapterTitle | BookTitle"
   function extractBookTitle() {
     const parts = document.title.split(' | ');
@@ -96,7 +101,7 @@
 
   // Listen for commands
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'startDownload') startDownload();
+    if (message.action === 'startDownload') startDownload(message.attemptId);
     else if (message.action === 'cancelDownload') cancelDownload();
     else if (message.action === 'redetectBook') {
       // Re-runs detection: groundwork for SPA route changes, and the test
@@ -203,10 +208,11 @@
     }
   }
 
-  async function startDownload() {
+  async function startDownload(attemptId) {
     if (abortController) return; // Already downloading
     const isbn = Fetcher.extractIsbn(window.location.href);
     if (!isbn) return;
+    currentAttemptId = attemptId || null;
 
     const controller = new AbortController();
     abortController = controller;
@@ -267,6 +273,7 @@
       console.error('Download failed:', err);
       chrome.runtime.sendMessage({
         action: 'downloadError',
+        attemptId: currentAttemptId,
         error: err.message === 'SESSION_EXPIRED'
           ? 'Session expired. Please log in to O\'Reilly and try again.'
           : err.message,
@@ -355,6 +362,7 @@
 
       chrome.runtime.sendMessage({
         action: 'progress',
+        attemptId: currentAttemptId,
         chapter: 0,
         totalChapters,
         images: downloadedImageCount,
@@ -487,6 +495,7 @@
         completedChapters++;
         chrome.runtime.sendMessage({
           action: 'progress',
+          attemptId: currentAttemptId,
           chapter: completedChapters,
           totalChapters,
           images: downloadedImageCount,
@@ -560,7 +569,7 @@
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 10000);
 
-    chrome.runtime.sendMessage({ action: 'downloadComplete' });
+    chrome.runtime.sendMessage({ action: 'downloadComplete', attemptId: currentAttemptId });
   }
 
   detectBook();

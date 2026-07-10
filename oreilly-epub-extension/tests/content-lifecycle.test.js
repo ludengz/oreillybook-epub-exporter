@@ -199,6 +199,22 @@ describe('content.js download lifecycle', function() {
     });
   });
 
+  it('carries the attemptId from startDownload on every lifecycle message', async function() {
+    await withPatchedEnv(successFetchMock(), async () => {
+      await ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'cancelDownload' });
+      ChromeMock.clearMessages();
+      ChromeMock.dispatchTo(CONTENT_LISTENER, { action: 'startDownload', attemptId: 'attempt-123' });
+      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        { timeout: 8000, label: 'attemptId downloadComplete' });
+      const lifecycle = ChromeMock.sentMessages.filter(m =>
+        ['progress', 'downloadComplete', 'downloadError'].includes(m.action));
+      assert(lifecycle.length > 0, 'expected lifecycle messages');
+      for (const m of lifecycle) {
+        assertEqual(m.attemptId, 'attempt-123', `${m.action} must carry the attemptId`);
+      }
+    }, '9787070707070');
+  });
+
   it('allows retry after a failed download', async function() {
     const failingFetch = async () => mockResponse({ ok: false, status: 500 });
     await withPatchedEnv(failingFetch, async () => {

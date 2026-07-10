@@ -9,6 +9,8 @@
 
   const listeners = [];
   const sentMessages = [];
+  const badgeEvents = [];
+  const tabRemovedListeners = [];
   let storageStore = {};
   let tabsSendMessageImpl = async () => undefined;
   let messageResponders = {};
@@ -39,12 +41,12 @@
       },
     },
     tabs: {
-      onRemoved: { addListener() {} },
+      onRemoved: { addListener(fn) { tabRemovedListeners.push(fn); } },
       sendMessage(tabId, message) { return tabsSendMessageImpl(tabId, message); },
     },
     action: {
-      setBadgeText() {},
-      setBadgeBackgroundColor() {},
+      setBadgeText(details) { badgeEvents.push({ kind: 'text', ...details }); },
+      setBadgeBackgroundColor(details) { badgeEvents.push({ kind: 'color', ...details }); },
     },
     notifications: { create() {} },
   });
@@ -66,6 +68,12 @@
     resetStorage(initial = {}) { storageStore = initial; },
     getStorage() { return storageStore; },
     setTabsSendMessage(fn) { tabsSendMessageImpl = fn; },
+    badgeEvents,
+    clearBadgeEvents() { badgeEvents.length = 0; },
+    // Fire chrome.tabs.onRemoved listeners; resolves after all handlers settle
+    async fireTabRemoved(tabId) {
+      await Promise.all(tabRemovedListeners.map(fn => Promise.resolve(fn(tabId))));
+    },
   };
 
   window.waitFor = async function waitFor(predicate, { timeout = 3000, interval = 20, label = 'condition' } = {}) {

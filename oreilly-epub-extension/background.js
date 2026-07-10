@@ -22,8 +22,23 @@ const DEFAULT_STATE = {
   progress: null,
   error: null,
   downloadingTabId: null,
+  attemptId: null, // generation id of the active download; guards late messages
   bookInfoByTab: {},
+  reportByTab: {}, // per-tab quality report snapshots (last attempt per tab)
 };
+
+// Lifecycle messages (progress/downloadComplete/downloadError) are only
+// trusted while their attempt is the active one. A message that lost a race
+// against cancelDownload or a newer download carries a stale attemptId (or
+// arrives from the wrong tab) and must be dropped, or it would resurrect a
+// cancelled download's status, mint ghost reports, or fire false
+// notifications.
+function isCurrentAttempt(st, message, sender) {
+  return st.status === 'downloading'
+    && st.attemptId != null
+    && message.attemptId === st.attemptId
+    && sender.tab?.id === st.downloadingTabId;
+}
 
 async function getState() {
   const result = await chrome.storage.session.get('state');
@@ -44,18 +59,36 @@ async function setTabBookInfo(tabId, bookInfo) {
   await chrome.storage.session.set({ state: { ...state, bookInfoByTab } });
 }
 
+async function setTabReport(tabId, report) {
+  if (tabId == null) return;
+  const state = await getState();
+  const reportByTab = { ...state.reportByTab, [tabId]: report };
+  await chrome.storage.session.set({ state: { ...state, reportByTab } });
+}
+
 async function removeTabBookInfo(tabId) {
   const state = await getState();
   const bookInfoByTab = { ...state.bookInfoByTab };
   delete bookInfoByTab[tabId];
   const updates = { bookInfoByTab };
+  if (state.reportByTab && state.reportByTab[tabId]) {
+    const reportByTab = { ...state.reportByTab };
+    delete reportByTab[tabId];
+    updates.reportByTab = reportByTab;
+    // A stable complete state belongs to its report; when that report's tab
+    // goes away and nothing is downloading, return to baseline
+    if (state.status === 'complete' && state.downloadingTabId == null) {
+      updates.status = 'idle';
+    }
+  }
   if (state.downloadingTabId === tabId) {
     updates.status = 'idle';
     updates.progress = null;
     updates.error = null;
     updates.downloadingTabId = null;
-    chrome.action.setBadgeText({ text: '' });
+    updates.attemptId = null;
   }
+  // Per-tab badges die with their tab; no badge call needed here
   await chrome.storage.session.set({ state: { ...state, ...updates } });
 }
 
@@ -90,13 +123,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, reason: 'no_tab' });
           return;
         }
-        await setState({ downloadingTabId: targetTabId, status: 'downloading' });
+        // New attempt: a fresh generation id gates every lifecycle message
+        // of this download; the starting tab's old badge and report go away
+        const attemptId = crypto.randomUUID();
+        const reportByTab = { ...st.reportByTab };
+        delete reportByTab[targetTabId];
+        await setState({
+          downloadingTabId: targetTabId,
+          status: 'downloading',
+          attemptId,
+          progress: null,
+          error: null,
+          reportByTab,
+        });
+        chrome.action.setBadgeText({ text: '', tabId: targetTabId });
         try {
-          await chrome.tabs.sendMessage(targetTabId, { action: 'startDownload' });
+          await chrome.tabs.sendMessage(targetTabId, { action: 'startDownload', attemptId });
         } catch (err) {
           // Content script unreachable (e.g. extension reloaded, page not refreshed):
           // roll back so the UI is not stuck in a downloading state forever
-          await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null });
+          await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null, attemptId: null });
           sendResponse({ ok: false, reason: 'content_script_unreachable' });
           return;
         }
@@ -108,9 +154,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const st = await getState();
         if (st.downloadingTabId) {
           chrome.tabs.sendMessage(st.downloadingTabId, { action: 'cancelDownload' });
+          chrome.action.setBadgeText({ text: '', tabId: st.downloadingTabId });
         }
-        await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null });
-        chrome.action.setBadgeText({ text: '' });
+        // Nulling attemptId makes any in-flight message of this attempt stale
+        await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null, attemptId: null });
+        sendResponse({ ok: true });
         return;
       }
 
@@ -123,47 +171,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'progress': {
         const st = await getState();
+        if (!isCurrentAttempt(st, message, sender)) {
+          sendResponse({ ok: false, reason: 'stale_attempt' });
+          return;
+        }
         const progress = {
           chapter: message.chapter,
           totalChapters: message.totalChapters,
           images: message.images,
           totalImages: message.totalImages,
         };
-        await setState({ status: 'downloading', progress });
+        await setState({ progress });
         chrome.action.setBadgeText({
           text: `${message.chapter}/${message.totalChapters}`,
+          tabId: st.downloadingTabId,
         });
-        chrome.action.setBadgeBackgroundColor({ color: '#2563eb' });
+        chrome.action.setBadgeBackgroundColor({ color: '#2563eb', tabId: st.downloadingTabId });
         chrome.runtime.sendMessage({
           action: 'progressUpdate',
           tabId: st.downloadingTabId,
           ...progress,
         }).catch(() => {});
+        sendResponse({ ok: true });
         return;
       }
 
       case 'downloadComplete': {
         const st = await getState();
+        if (!isCurrentAttempt(st, message, sender)) {
+          sendResponse({ ok: false, reason: 'stale_attempt' });
+          return;
+        }
         const completedTabId = st.downloadingTabId;
-        await setState({ status: 'complete', downloadingTabId: null });
-        chrome.action.setBadgeText({ text: '✓' });
-        chrome.action.setBadgeBackgroundColor({ color: '#16a34a' });
+        // Stable state: no timer resets this — it clears when a new download
+        // starts, the popup acks the report, or the tab closes (MV3 SW
+        // termination makes delayed cleanup unreliable and racy)
+        await setState({ status: 'complete', downloadingTabId: null, attemptId: null, progress: null });
+        chrome.action.setBadgeText({ text: '✓', tabId: completedTabId });
+        chrome.action.setBadgeBackgroundColor({ color: '#16a34a', tabId: completedTabId });
         chrome.runtime.sendMessage({
           action: 'downloadComplete',
           tabId: completedTabId,
         }).catch(() => {});
-        setTimeout(async () => {
-          chrome.action.setBadgeText({ text: '' });
-          await setState({ status: 'idle' });
-        }, 5000);
+        sendResponse({ ok: true });
         return;
       }
 
       case 'downloadError': {
         const st = await getState();
-        await setState({ status: 'error', error: message.error });
-        chrome.action.setBadgeText({ text: '!' });
-        chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+        if (!isCurrentAttempt(st, message, sender)) {
+          sendResponse({ ok: false, reason: 'stale_attempt' });
+          return;
+        }
+        // downloadingTabId stays set: the popup's error view is scoped to it
+        await setState({ status: 'error', error: message.error, attemptId: null });
+        chrome.action.setBadgeText({ text: '!', tabId: st.downloadingTabId });
+        chrome.action.setBadgeBackgroundColor({ color: '#dc2626', tabId: st.downloadingTabId });
         chrome.runtime.sendMessage({
           action: 'downloadError',
           tabId: st.downloadingTabId,
@@ -177,6 +240,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             message: 'Session expired. Please log in to O\'Reilly and try again.',
           });
         }
+        sendResponse({ ok: true });
+        return;
+      }
+
+      case 'reportAck': {
+        // Popup rendered the report panel: the badge has served its purpose.
+        // Badge only — the report itself persists until replaced/tab close.
+        if (message.tabId != null) {
+          chrome.action.setBadgeText({ text: '', tabId: message.tabId });
+        }
+        sendResponse({ ok: true });
         return;
       }
 
