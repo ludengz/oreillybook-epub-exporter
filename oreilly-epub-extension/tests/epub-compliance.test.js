@@ -470,6 +470,125 @@ describe('content.js API cover fallback (integration)', function() {
   });
 });
 
+describe('content.js packaging integrity gate (integration)', function() {
+  it('blocks delivery on a fatal integrity violation', async function() {
+    const isbn = '9787000000008';
+    // A manifest item pointing at a file that is not in the ZIP is the
+    // fatal class: inject one through the real OPF generation path
+    const origOpf = EpubBuilder.generateOpf;
+    EpubBuilder.generateOpf = function(...args) {
+      return origOpf.apply(this, args).replace('</manifest>',
+        '<item id="ghost" href="Images/ghost.png" media-type="image/png"/></manifest>');
+    };
+    const origFetch = window.fetch;
+    const origExtract = Fetcher.extractIsbn;
+    const origClick = HTMLAnchorElement.prototype.click;
+    let clicked = false;
+    try {
+      Fetcher.extractIsbn = () => isbn;
+      window.fetch = coverScenarioFetchMock(origFetch, { isbn, coverUrl: null, includeCoverImage: true });
+      HTMLAnchorElement.prototype.click = function() { clicked = true; };
+      await ChromeMock.dispatchTo(0, { action: 'cancelDownload' });
+      ChromeMock.clearMessages();
+      ChromeMock.dispatchTo(0, { action: 'startDownload' });
+      await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
+        { timeout: 15000, label: 'validation downloadError' });
+      const msg = ChromeMock.sentMessages.find(m => m.action === 'downloadError');
+      assertEqual(msg.errorKind, 'validation');
+      assertContains(msg.error, 'EPUB integrity check failed');
+      assert(msg.report && msg.report.outcome === 'error', 'partial report must ride the error');
+      assert(msg.report.validationViolations.some(v => v.includes('ghost.png')),
+        'violation detail must name the missing file');
+      assertEqual(clicked, false, 'no file may be delivered on a fatal violation');
+      assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        'a blocked download must not complete');
+    } finally {
+      EpubBuilder.generateOpf = origOpf;
+      window.fetch = origFetch;
+      Fetcher.extractIsbn = origExtract;
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+  });
+
+  it('delivers normally with a report warning for an orphan ZIP entry', async function() {
+    const isbn = '9787000000009';
+    // Sneak an undeclared file into the ZIP right before validation runs
+    const origFile = JSZip.prototype.file;
+    JSZip.prototype.file = function(name, ...rest) {
+      const result = origFile.call(this, name, ...rest);
+      if (name === 'OEBPS/toc.ncx' && rest.length) {
+        origFile.call(this, 'OEBPS/Images/orphan.png', new ArrayBuffer(4));
+      }
+      return result;
+    };
+    try {
+      const { zipPaths, report } = await buildEpubWith({
+        isbn,
+        fetchMock: (orig) => coverScenarioFetchMock(orig, { isbn, coverUrl: null, includeCoverImage: true }),
+      });
+      assert(zipPaths.includes('OEBPS/Images/orphan.png'), 'the orphan ships in the ZIP');
+      assertEqual(report.validated, true);
+      assert(report.validationWarnings.some(w => w.includes('orphan.png')),
+        `warning must name the orphan; got: ${report.validationWarnings.join('; ')}`);
+    } finally {
+      JSZip.prototype.file = origFile;
+    }
+  });
+
+  it('fails open when the validator itself crashes', async function() {
+    const isbn = '9787000000010';
+    const origValidate = EpubValidator.validateStructure;
+    EpubValidator.validateStructure = () => { throw new Error('validator exploded'); };
+    try {
+      const { report, zipPaths } = await buildEpubWith({
+        isbn,
+        fetchMock: (orig) => coverScenarioFetchMock(orig, { isbn, coverUrl: null, includeCoverImage: true }),
+      });
+      assert(zipPaths.length > 0, 'the download must complete normally');
+      assertEqual(report.validated, false, 'fail-open must mark the report unvalidated');
+    } finally {
+      EpubValidator.validateStructure = origValidate;
+    }
+  });
+
+  it('surfaces no validation error for a download cancelled mid-validation', async function() {
+    const isbn = '9787000000011';
+    let releaseValidator;
+    const gate = new Promise(resolve => { releaseValidator = resolve; });
+    let validatorEntered = false;
+    const origValidate = EpubValidator.validateStructure;
+    EpubValidator.validateStructure = async function(...args) {
+      validatorEntered = true;
+      await gate;
+      return origValidate.apply(this, args);
+    };
+    const origFetch = window.fetch;
+    const origExtract = Fetcher.extractIsbn;
+    const origClick = HTMLAnchorElement.prototype.click;
+    try {
+      Fetcher.extractIsbn = () => isbn;
+      window.fetch = coverScenarioFetchMock(origFetch, { isbn, coverUrl: null, includeCoverImage: true });
+      HTMLAnchorElement.prototype.click = function() {};
+      await ChromeMock.dispatchTo(0, { action: 'cancelDownload' });
+      ChromeMock.clearMessages();
+      ChromeMock.dispatchTo(0, { action: 'startDownload' });
+      await waitFor(() => validatorEntered, { timeout: 15000, label: 'validator entry' });
+      await ChromeMock.dispatchTo(0, { action: 'cancelDownload' });
+      releaseValidator();
+      await new Promise(r => setTimeout(r, 300));
+      assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
+        'a download cancelled during validation must not complete');
+      assert(!ChromeMock.sentMessages.some(m => m.action === 'downloadError'),
+        'cancel must not masquerade as any error, validation included');
+    } finally {
+      EpubValidator.validateStructure = origValidate;
+      window.fetch = origFetch;
+      Fetcher.extractIsbn = origExtract;
+      HTMLAnchorElement.prototype.click = origClick;
+    }
+  });
+});
+
 // Proxy assertions for the classes of epubcheck failures the in-browser
 // suite can check itself. The real epubcheck run remains the final gate.
 describe('content.js OPF metadata proxy assertions (epubcheck stand-ins)', function() {
