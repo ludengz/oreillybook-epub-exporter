@@ -148,6 +148,28 @@ describe('background.js attempt guards and stable complete state', function() {
     assert(state.reportByTab[7], 'ack must not delete the report');
   });
 
+  it('snapshots the report from downloadComplete into reportByTab', async function() {
+    const attemptId = await startAttempt(5);
+    const report = { attemptId, bookTitle: 'Snap Book', outcome: 'complete', counts: { chaptersOk: 3 } };
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadComplete', attemptId, report }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assert(state.reportByTab[5], 'report must be keyed by the sender tab');
+    assertEqual(state.reportByTab[5].bookTitle, 'Snap Book');
+    assertEqual(state.status, 'complete');
+  });
+
+  it('snapshots the partial report from downloadError into reportByTab', async function() {
+    const attemptId = await startAttempt(5);
+    const report = { attemptId, outcome: 'error', counts: { chaptersOk: 1 } };
+    await ChromeMock.dispatchTo(BACKGROUND_LISTENER,
+      { action: 'downloadError', attemptId, error: 'boom', report }, sender(5));
+    const state = ChromeMock.getStorage().state;
+    assertEqual(state.status, 'error');
+    assert(state.reportByTab[5], 'error-terminated attempts must keep their partial report');
+    assertEqual(state.reportByTab[5].outcome, 'error');
+  });
+
   it('closing the report tab removes its report and residual complete status', async function() {
     ChromeMock.resetStorage({ state: {
       status: 'complete', progress: null, error: null, downloadingTabId: null,

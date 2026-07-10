@@ -59,13 +59,6 @@ async function setTabBookInfo(tabId, bookInfo) {
   await chrome.storage.session.set({ state: { ...state, bookInfoByTab } });
 }
 
-async function setTabReport(tabId, report) {
-  if (tabId == null) return;
-  const state = await getState();
-  const reportByTab = { ...state.reportByTab, [tabId]: report };
-  await chrome.storage.session.set({ state: { ...state, reportByTab } });
-}
-
 async function removeTabBookInfo(tabId) {
   const state = await getState();
   const bookInfoByTab = { ...state.bookInfoByTab };
@@ -203,10 +196,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         const completedTabId = st.downloadingTabId;
+        // Snapshot the quality report before downloadingTabId is cleared; a
+        // single setState write keeps status and report consistent
+        const updates = { status: 'complete', downloadingTabId: null, attemptId: null, progress: null };
+        if (message.report) {
+          updates.reportByTab = { ...st.reportByTab, [completedTabId]: message.report };
+        }
         // Stable state: no timer resets this — it clears when a new download
         // starts, the popup acks the report, or the tab closes (MV3 SW
         // termination makes delayed cleanup unreliable and racy)
-        await setState({ status: 'complete', downloadingTabId: null, attemptId: null, progress: null });
+        await setState(updates);
         chrome.action.setBadgeText({ text: '✓', tabId: completedTabId });
         chrome.action.setBadgeBackgroundColor({ color: '#16a34a', tabId: completedTabId });
         chrome.runtime.sendMessage({
@@ -223,8 +222,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, reason: 'stale_attempt' });
           return;
         }
-        // downloadingTabId stays set: the popup's error view is scoped to it
-        await setState({ status: 'error', error: message.error, attemptId: null });
+        // downloadingTabId stays set: the popup's error view is scoped to it.
+        // The partial report is snapshotted too — an error-terminated attempt
+        // keeps the bookkeeping it accumulated
+        const errUpdates = { status: 'error', error: message.error, attemptId: null };
+        if (message.report) {
+          errUpdates.reportByTab = { ...st.reportByTab, [st.downloadingTabId]: message.report };
+        }
+        await setState(errUpdates);
         chrome.action.setBadgeText({ text: '!', tabId: st.downloadingTabId });
         chrome.action.setBadgeBackgroundColor({ color: '#dc2626', tabId: st.downloadingTabId });
         chrome.runtime.sendMessage({

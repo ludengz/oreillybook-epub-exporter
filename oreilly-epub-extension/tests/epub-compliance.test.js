@@ -240,11 +240,12 @@ async function buildEpubWith({ isbn, fetchMock, fetchImageResponder }) {
       { timeout: 15000, label: `downloadComplete for ${isbn}` });
 
     const fetchImageCalls = ChromeMock.sentMessages.filter(m => m.action === 'fetchImage').length;
+    const completeMsg = ChromeMock.sentMessages.find(m => m.action === 'downloadComplete');
     const buf = await (await origFetch(blobUrl)).arrayBuffer();
     const zip = await JSZip.loadAsync(buf);
     const opf = await zip.file('OEBPS/content.opf').async('string');
     const zipPaths = Object.keys(zip.files).filter(p => !zip.files[p].dir);
-    return { zip, opf, zipPaths, fetchImageCalls };
+    return { zip, opf, zipPaths, fetchImageCalls, report: completeMsg ? completeMsg.report : null };
   } finally {
     ChromeMock.clearResponders();
     window.fetch = origFetch;
@@ -353,6 +354,36 @@ describe('content.js API cover fallback (integration)', function() {
       assertContains(opf, 'href="Images/cover_1.jpg" media-type="image/jpeg" properties="cover-image"');
       const coverXhtml = await zip.file('OEBPS/Text/cover.xhtml').async('string');
       assertContains(coverXhtml, '../Images/cover_1.jpg', 'cover.xhtml must reference the deduped name');
+      assertNoImageOrphans(opf, zipPaths);
+    } finally {
+      Fetcher._fetchWithRetry = origRetry;
+    }
+  });
+
+  it('reports injected image failures while the EPUB stays orphan-free', async function() {
+    // The manifest cover.jpg 404s (one terminal image failure) while the API
+    // fallback cover succeeds — the report must count exactly that failure
+    // and the produced EPUB must still reconcile OPF vs ZIP
+    const isbn = '9787000000007';
+    const origRetry = Fetcher._fetchWithRetry;
+    Fetcher._fetchWithRetry = function(url, opts) {
+      return origRetry.call(Fetcher, url, Object.assign({}, opts, { maxRetries: 0 }));
+    };
+    try {
+      const { opf, zipPaths, report } = await buildEpubWith({
+        isbn,
+        fetchMock: (orig) => coverScenarioFetchMock(orig, {
+          isbn, coverUrl: `https://learning.oreilly.com/library/cover/${isbn}/`, failCoverImage: true,
+        }),
+        fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
+      });
+      assert(report, 'downloadComplete must carry the report');
+      assertEqual(report.counts.imagesFailed, 1, 'exactly the failed manifest cover');
+      assertEqual(report.failures.images[0], 'images/cover.jpg');
+      assertEqual(report.counts.imagesOk, 2, 'fig1.png plus the fallback cover');
+      assertEqual(report.counts.chaptersOk, 1);
+      assertEqual(report.counts.coverPresent, true, 'the fallback cover still made it');
+      assertEqual(report.counts.metadataFromApi, true);
       assertNoImageOrphans(opf, zipPaths);
     } finally {
       Fetcher._fetchWithRetry = origRetry;
