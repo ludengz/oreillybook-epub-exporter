@@ -69,7 +69,7 @@ What already works unchanged (verified by code scan): all API fetches are relati
 - **Allowlist gains the declared proxy hosts, keeping target-URL authorization**: `isAllowedImageUrl` accepts the proxy book host and (if Unit 1 shows it is used) the proxied CDN host, as exact matches. Sender-scoped authorization — required by the runtime design, because there any granted origin could have driven the SW to fetch the user's personal `learning.oreilly.com` session — is **not** needed here: every origin the content script runs on is one we declared. The post-redirect re-validation stays as-is.
 - **Origin normalization is a pure helper, idempotent and narrow**: swap the host to `location.origin` only when the URL's hostname is exactly `learning.oreilly.com` and the page origin differs. URLs EZproxy already rewrote don't match the condition and pass through untouched; CDN/S3 hosts are never touched. The swap affects only the fetch URL — `imageMap` keys stay the original `src`, so XHTML rewriting is unaffected. A swapped absolute URL becomes same-origin and takes the relative/API path (Strategy 3), never the SW proxy.
 - **`fetchCoverFallback` defers absolute URLs to the SW.** Its local allowlist check must go: an *already-proxied* `cover_url` (`cdn-oreillystatic-com.<suffix>`) is neither same-origin nor on the pre-change static list, so a local gate would reject a cover the SW would have allowed. The SW remains the single enforcement point; fail-closed semantics are unchanged (SW refuses → `null` → coverless EPUB).
-- **Proxy session-expiry detection in `_fetchWithRetry`**: treat as `SESSION_EXPIRED` when (a) HTTP 401 (existing), or (b) the response was redirected and the final URL's origin left the request origin (or landed on a `login.`-prefixed host), or (c) an `/api/` request answers with `Content-Type: text/html`. Error copy branches on the page origin: direct → "log in to O'Reilly"; proxy → "your library session expired — sign in through your library's portal again". This is the highest-value correctness fix in the plan: without it a login page is silently packaged as a chapter, exactly the class of failure the quality gate exists to prevent.
+- **Proxy session-expiry detection in `_fetchWithRetry`** *(revised by Unit 1)*: treat as `SESSION_EXPIRED` when (a) HTTP 401 (existing), or (b) the request, issued with `redirect: 'manual'`, comes back as `response.type === 'opaqueredirect'`. The originally-planned predicates — inspecting `response.redirected`/`response.url`, and flagging `text/html` on `/api/` paths — are respectively unobservable from a content script and outright wrong (chapters *are* `text/html`); see Calibration Findings P5. Error copy branches on the page origin: direct → "log in to O'Reilly"; proxy → "your library session expired — sign in through your library's portal again". The value is fast, accurate diagnosis and coverage of same-origin-login EZproxy configs; at SPL, CORS already prevents a login page from reaching the ZIP.
 - **eink CSS: broaden `web_accessible_resources.matches` to the declared hosts** (user decision). A content script cannot fetch a WAR resource from an origin outside `matches`. Since the origins are known statically, adding them to `matches` is a one-line fix — no new SW message action, no path-guard, no migration of the seven `eink-override.css` fetch stubs across the test suites. `chrome.scripting.insertCSS` is not an alternative: this resource is embedded as *text* into the EPUB ZIP, not applied to the page.
 - **Live calibration before code** (user decision — SPL credentials available): Unit 1 settles what research could not — whether the CDN is proxied (decides one manifest line and one allowlist entry), whether JSON URLs arrive rewritten, and the exact shape of an expired session.
 
@@ -83,11 +83,15 @@ What already works unchanged (verified by code scan): all API fetches are relati
 - CSS delivery: broaden WAR matches rather than remove WAR (user decision).
 - Live verification: yes, Unit 1, before the code units (user decision).
 
-### Deferred to Implementation
+### Resolved by Unit 1 (see Calibration Findings)
 
-- Whether the proxied CDN host (`cdn-oreillystatic-com.ezproxy.spl.org`) needs declaring at all — Unit 1 observes SPL's actual routing and decides one manifest line plus one allowlist entry. If the CDN is direct, nothing is added.
-- The exact redirect conditions that mark expiry (final-host prefix vs origin change vs both) — calibrated against Unit 1's observed chain, then pinned by tests.
-- Whether `document.title` on proxied pages keeps the `"Chapter | Book"` shape the title fallback expects (EZproxy does not rewrite titles; confirm during Unit 1).
+- Proxied CDN host: **not declared.** `cdn.oreillystatic.com` is absent from SPL's stanza and unreferenced by the book (P4).
+- Expiry predicate: **`redirect: 'manual'` + `response.type === 'opaqueredirect'`.** The plan's redirect-inspection and `text/html` predicates are respectively undetectable and wrong (P5).
+- `document.title`: **unchanged shape**, no code impact (P6).
+
+### Newly Opened by Unit 1
+
+- **Chrome's lookalike interstitial gates the whole feature** (P1). No code remedy exists — extensions are inert on interstitials. Handled as documentation (README) plus a step in Unit 4's live run. Left open: whether Chrome's dismissal survives profile sync / a fresh profile, which would decide how prominent the README warning must be.
 
 ## High-Level Technical Design
 
@@ -111,7 +115,7 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 
 ## Implementation Units
 
-- [ ] **Unit 1: Live proxy calibration (SPL session)**
+- [x] **Unit 1: Live proxy calibration (SPL session)** — done 2026-07-10; see Calibration Findings.
 
 **Goal:** Replace the three research blind spots with observed facts before code is written against assumptions.
 
@@ -138,10 +142,10 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 
 **Requirements:** R1, R2
 
-**Dependencies:** Unit 1 (CDN routing decides whether the CDN host is declared)
+**Dependencies:** Unit 1 — **satisfied**: exactly one host is declared (`learning-oreilly-com.ezproxy.spl.org`); no proxied CDN host exists at SPL (P4).
 
 **Files:**
-- Modify: `oreilly-epub-extension/manifest.json` (add the proxy book host — and, only if Unit 1 showed it is used, the proxied CDN host — to `content_scripts.matches`, `host_permissions`, and `web_accessible_resources.matches`)
+- Modify: `oreilly-epub-extension/manifest.json` (add the proxy book host to `content_scripts.matches`, `host_permissions`, and `web_accessible_resources.matches`)
 - Modify: `oreilly-epub-extension/lib/path-utils.js` (pure host-swap helper; `isAllowedImageUrl` gains the declared proxy hosts)
 - Modify: `oreilly-epub-extension/content.js` (cover base + drop the local cover gate; pre-Strategy-4 swap)
 - Test: `oreilly-epub-extension/tests/path-utils.test.js`
@@ -149,8 +153,8 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 - Test: `oreilly-epub-extension/tests/epub-compliance.test.js` (proxy-origin fixture)
 
 **Approach:**
-- Host-swap helper: swap only when the URL's hostname is exactly `learning.oreilly.com` and the page origin differs; idempotent on already-proxied URLs; never touches other hosts.
-- `fetchCoverFallback`: resolve `cover_url` against `location.origin` instead of the hardcoded base, and remove its local `isAllowedImageUrl` check so an already-proxied cover reaches the SW (which is the enforcement point). Fail-closed behavior is unchanged.
+- `fetchCoverFallback` (`content.js:249-253`) is the one place the pipeline actually breaks at SPL: resolve `cover_url` against `location.origin` instead of the hardcoded `https://learning.oreilly.com` base, and **remove its local `isAllowedImageUrl` check** so the already-proxied cover reaches the SW (the single enforcement point). Fail-closed behavior is unchanged. Per P3 this — not the host-swap — is what restores the cover.
+- Host-swap helper: swap only when the URL's hostname is exactly `learning.oreilly.com` and the page origin differs; idempotent on already-proxied URLs; never touches other hosts. **Defensive only** — at SPL, EZproxy pre-rewrites every JSON URL (P3), so the helper is a no-op. It earns its keep on EZproxy < 6.0.8 or `MimeFilter`-restricted deployments that hand back real-host URLs. Comment it as such so a later reader does not mistake it for load-bearing code.
 - Chapter images: swap absolute `learning.oreilly.com` URLs to the page origin *before* the Strategy-4 branch, so they become same-origin and take Strategy 3. `imageMap` / `chapterImageMap` keys stay the original `src` — `EinkOptimizer` rewrites XHTML from them.
 - `isAllowedImageUrl`: add the declared proxy hosts as exact matches, alongside the existing entries. The existing manifest-sync test must be extended to cover the new hosts.
 - The `path-utils.test.js` manifest-sync test is the guard that keeps `host_permissions` and the allowlist from drifting when a future user adds their own library.
@@ -184,19 +188,21 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 - Test: `oreilly-epub-extension/tests/fetcher.test.js`
 - Test: `oreilly-epub-extension/tests/content-lifecycle.test.js`
 
-**Approach:**
-- `_fetchWithRetry` gains expiry detection beyond 401: a redirected response whose final URL left the request origin (or landed on a `login.`-prefixed host) throws `SESSION_EXPIRED`; secondary guard: an `/api/` request answered with `Content-Type: text/html` throws the same. Exact predicates calibrated against Unit 1's observed chain.
+**Approach (rewritten after Unit 1 — the original predicates were disproven):**
+- `_fetchWithRetry` issues its request with `redirect: 'manual'` and throws `SESSION_EXPIRED` when `response.type === 'opaqueredirect'`. This check must sit **before** the existing `!response.ok` branch (an opaque redirect reports `status: 0`, which would otherwise become a retried `HTTP 0`). The `401` branch is untouched.
+- Rejected predicates, for the record: inspecting `response.redirected` / `response.url` is impossible (the cross-origin login redirect is CORS-blocked into a `TypeError` before any response exists), and `Content-Type: text/html` on an `/api/` path is a *normal* chapter response — that guard would have failed every download in both modes.
 - Content's session-expired message branches on whether `location.origin` is the real host — the proxy variant tells the user to sign back in through the library portal.
-- Chapter fetches already treat `SESSION_EXPIRED` as fatal (the rethrow guards added by the quality-gate work), so once the throw happens at fetch level no login-page bytes can reach the ZIP.
+- Chapter fetches already treat `SESSION_EXPIRED` as fatal (the rethrow guards added by the quality-gate work), so once the throw happens at fetch level no login-page bytes can reach the ZIP. At SPL this path was already unreachable (CORS threw first); the guard's real beneficiaries are same-origin-login EZproxy configurations, plus every SPL user who today waits through 4 retries × 13 s of backoff per file before getting a placeholder.
 
 **Execution note:** Test-first — the failure modes are crisp and mock-expressible (`response.url`, `response.redirected`, headers).
 
 **Test scenarios:**
-- Happy path: HTTP 401 still throws `SESSION_EXPIRED` (regression).
-- Happy path: a redirected response landing on `login.ezproxy.spl.org` → `SESSION_EXPIRED`; a redirected response staying same-origin (an ordinary API redirect) → not expired.
-- Edge case: redirect to another allowed O'Reilly host in direct mode → behavior chosen from Unit 1's observation and pinned by the test.
-- Error path: an `/api/` request returning 200 with `Content-Type: text/html` → `SESSION_EXPIRED`, not a JSON parse crash.
-- Integration: expiry mid-download (a chapter fetch returns the login redirect) → `downloadError` with `errorKind: 'session'`, the partial quality report intact, no EPUB delivered, and the popup shows the library-variant copy on a proxied-origin fixture.
+- Happy path: HTTP 401 still throws `SESSION_EXPIRED` (direct-mode regression).
+- Happy path: `response.type === 'opaqueredirect'` (status 0) → `SESSION_EXPIRED`, thrown without consuming a retry.
+- Happy path: an authenticated `type: 'basic'` 200 answering `Content-Type: text/html` (a real chapter) → **succeeds**. This is the regression test for the predicate Unit 1 killed; it must exist even though the bad code never shipped.
+- Edge case: `_fetchWithRetry` is invoked with `redirect: 'manual'` — assert the option reaches `fetch`, so a later refactor cannot silently restore `follow` and reintroduce the un-observable failure.
+- Error path: a genuine `TypeError` (offline) still retries and then throws a non-session error — expiry detection must not swallow network faults.
+- Integration: expiry mid-download (a chapter fetch yields an opaque redirect) → `downloadError` with `errorKind: 'session'`, the partial quality report intact, no EPUB delivered, and the popup shows the library-variant copy on a proxied-origin fixture.
 - Integration: no login-page bytes appear anywhere in a ZIP produced during an expiry run.
 
 **Verification:**
@@ -252,17 +258,43 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 | Risk | Mitigation |
 |------|------------|
 | SPL's private stanza doesn't proxy a path the pipeline needs (e.g. `/api/v2/`) → downloads impossible at that library | Unit 1 verifies end-to-end before any code is written; the failure mode is a clean `SESSION_EXPIRED`-style error, not corruption; documented as per-library variance |
-| **Login page packaged as chapter content** — the pre-existing, highest-severity failure this plan closes | Unit 3's redirect + content-type detection throws at the fetch layer, where the quality gate's existing rethrow guards already treat `SESSION_EXPIRED` as fatal; an integration test asserts no login HTML reaches the ZIP |
-| Expiry heuristics false-positive on legitimate redirects (locale bounces, A/B) | Predicates calibrated against Unit 1's observed chain; same-origin redirects never trigger; tests pin the chosen behavior |
+| **Chrome's lookalike interstitial blocks the proxy host** (P1) — the extension cannot run at all until dismissed, and no code can dismiss it | Documentation only. README's Library-access section leads with the one-time "Details → Continue" step; Unit 4's live run exercises it. Verified real: SPL's own portal link to `/home/` triggers it too |
+| **Login page packaged as chapter content** — *reassessed by Unit 1*: unreachable at SPL (the cross-origin login redirect is CORS-blocked into a `TypeError` first), but live for EZproxy configs whose login stays same-origin | Unit 3's `opaqueredirect` predicate is origin-agnostic and catches both shapes; an integration test asserts no login HTML reaches the ZIP. What SPL users actually suffer today — 4 retries × 13 s backoff per file, then placeholder chapters — is closed by the same change |
+| Expiry heuristics false-positive on legitimate redirects (locale bounces, Akamai edge) | `redirect: 'manual'` verified non-disruptive: authed search / files-JSON / chapter / image all return `type: 'basic'` at SPL, and unauthenticated direct-mode API endpoints return `200` with no `3xx` anywhere. A false positive surfaces as a loud `SESSION_EXPIRED`, never as silent corruption |
 | A future user adds their library to `host_permissions` but not to `isAllowedImageUrl`, silently breaking image fetches (or vice versa, silently widening the credentialed proxy) | The existing manifest-sync test is extended to cover every declared host in both directions; README's "add your library" instructions name both places |
 | Proxied CDN discovered later at another library, though absent at SPL | The allowlist and manifest take exact hosts, so it is the same one-line addition; nothing in the design assumes the CDN is direct |
 | Host-swap corrupts `imageMap` keys and breaks XHTML rewriting | The swap is applied to the fetch URL only, never to map keys; an integration test asserts the rewritten XHTML still points at the packaged filename |
 
 ## Documentation / Operational Notes
 
-- README gains a "Library access" section: the declared host, the one-line edit for another library (naming both `manifest.json` and `lib/path-utils.js`), unsupported proxy types, and the OpenAthens note.
+- README gains a "Library access" section, **led by the Chrome interstitial step** (P1): the declared host, the one-time "Safety warning → Details → Continue" click, the one-line edit for another library (naming both `manifest.json` and `lib/path-utils.js`), unsupported proxy types, and the OpenAthens note.
 - CLAUDE.md records the origin-normalization rule, the expiry predicate, and the manifest↔allowlist sync invariant.
 - The Unit 1 calibration appendix doubles as the institutional record of SPL-observed proxy behavior — the only place this repo will have observed EZproxy facts.
+
+## Calibration Findings (Unit 1 — observed 2026-07-10, live SPL session)
+
+Probed against `https://learning-oreilly-com.ezproxy.spl.org/library/view/python-crash-course/9781098156664/f01.xhtml` with the user's authenticated EZproxy session. Page-context `fetch` was used deliberately: it is subject to the same CORS rules a content script is, so its observations transfer.
+
+| # | Probe | Result | vs. research |
+|---|-------|--------|--------------|
+| P1 | Extension can activate on the proxy host | **Blocked before any code runs** — Chrome shows its lookalike/target-embedding interstitial (`<title>Safety warning`, "Did you mean learning.oreilly.com?") on `learning-oreilly-com.ezproxy.spl.org`, including on SPL's own portal link to `/home/`. Extensions cannot run, screenshot, or attach to an interstitial. Dismissible by the user (Details → Continue); Chrome then remembers the site. | **NEW — unanticipated** |
+| P2 | API under the institutional session | `/api/v2/search/`, `/api/v2/epubs/.../files/`, chapter `.xhtml`, and `.png` assets all return `200`, `redirected: false`, same-origin, relative paths intact. `archive_id` matches the URL ISBN. | confirmed |
+| P3 | JSON URL rewriting | **Total.** `cover_url`, `web_url`, `next`, and every `files[].url` arrive as `learning-oreilly-com.ezproxy.spl.org`. The real host never appears in a JSON body. | confirmed, stronger than assumed |
+| P4 | CDN routing | `cdn.oreillystatic.com` is **not in SPL's stanza**: `cdn-oreillystatic-com.ezproxy.spl.org` returns the same bare `Location: https://login.ezproxy.spl.org/favicon.ico` bounce as a nonexistent host, whereas an in-stanza host (`www-safaribooksonline-com.…`) returns `login?qurl=https://www.safaribooksonline.com/…`. Independently, all 61 images in the book's manifest and every `<img>` on the live reader page are served from the proxied `learning` host; no chapter references the CDN. | **contradicted** — no proxied CDN host exists |
+| P5 | Session-expiry shape | At the HTTP layer: `302` → `login.ezproxy.spl.org` → `200 text/html` (as predicted). **But a page/content-script `fetch` never sees that**: the redirect leaves the origin, CORS blocks the response, and `fetch` throws `TypeError: Failed to fetch`. `response.redirected` and `response.url` are unobservable. With `redirect: 'manual'` the same request yields `type: 'opaqueredirect'`, `status: 0` — on both the JSON and chapter endpoints — while every authenticated request stays `type: 'basic'`, `200`. | **contradicted** — both plan predicates unusable |
+| P6 | `document.title` shape | `"Praise for Python Crash Course \| Python Crash Course, 3rd Edition"` — the `"Chapter \| Book"` split the title fallback depends on is preserved. | confirmed |
+
+### Consequences
+
+- **P1 → docs + Unit 4.** No code fix exists; an extension cannot touch an interstitial. README must tell library users to click through once. Unit 4's live end-to-end must account for it.
+- **P3 → Unit 2's real fix is the *removal*, not the swap.** Since EZproxy hands us an already-proxied `cover_url`, the host-swap helper is a no-op at SPL. What actually loses the cover today is `fetchCoverFallback`'s local `PathUtils.isAllowedImageUrl` gate (`content.js:250`) rejecting the proxied host. The swap helper stays as insurance for libraries whose EZproxy predates JSON rewriting (< 6.0.8) or disables it via `MimeFilter`; it is defensive, and the plan should not claim otherwise.
+- **P4 → one manifest host, not two.** Nothing proxied-CDN gets declared. If some other book references `cdn.oreillystatic.com` absolutely, EZproxy leaves it alone (not in stanza), so it arrives as the real CDN host and the existing `*.oreillystatic.com` allowlist entry already covers it through the SW proxy.
+- **P5 → Unit 3's predicate is replaced wholesale.**
+  - Predicate (b) *("redirected off-origin / `login.`-prefixed host")* is **undetectable** from a content script — the throw happens first.
+  - Predicate (c) *("`/api/` request answering `text/html` ⇒ expired")* is **actively wrong**: authenticated chapter fetches legitimately return `Content-Type: text/html` (`/api/v2/epubs/.../files/f01.xhtml` → `text/html`). Shipping it would fail every chapter of every book, in both modes.
+  - Replacement: issue API fetches with `redirect: 'manual'` and treat `response.type === 'opaqueredirect'` as `SESSION_EXPIRED`. Verified safe: authenticated search / files-JSON / chapter / image requests all return `type: 'basic'` under `manual`, and unauthenticated `learning.oreilly.com` API endpoints return `200` with no `3xx` anywhere, so direct mode is undisturbed. The `401` branch stays for direct mode.
+  - This predicate is **origin-agnostic**, which matters: it also catches EZproxy configurations whose login redirect stays *same-origin* — and those, not SPL, are where the "login page packaged as a chapter" hazard actually lives.
+- **P5 → the corruption risk was mis-stated, but a real harm remains.** At SPL an expired session cannot silently produce a login-page chapter; CORS throws first. What it *does* produce today is a `TypeError` that `_fetchWithRetry` treats as a transient network fault: 4 attempts with 1 s + 3 s + 9 s backoff, per file, across 102 files, ending in placeholder chapters and a generic error. Unit 3's value is fast, accurate diagnosis (and covering the same-origin-login configs), not preventing corruption at SPL.
 
 ## Sources & References
 
