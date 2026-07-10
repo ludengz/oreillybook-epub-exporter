@@ -57,3 +57,64 @@ describe('EinkOptimizer.processChapter', function() {
     assert(matchCount === 1, `Expected exactly 1 <html tag, found ${matchCount}`);
   });
 });
+
+// --- Namespace-prefixed attributes surviving the text/html fallback ---
+// O'Reilly's newer books ship chapters as HTML fragments carrying epub:type
+// attributes (structural semantics). The text/html fallback stores them as
+// namespace-less colon-named attributes; a naive XMLSerializer pass emits
+// them with an unbound prefix, making the packaged chapter non-well-formed
+// XHTML (the validator's strict reparse then flags every such chapter).
+describe('EinkOptimizer.processChapter namespace repair', function() {
+  // The validator's exact check (epub-validator.js): strict parse, no fallback
+  function strictParseError(xhtml) {
+    const doc = new DOMParser().parseFromString(xhtml, 'application/xhtml+xml');
+    const err = doc.querySelector('parsererror');
+    return err ? err.textContent : null;
+  }
+
+  it('binds epub:type from an HTML-fragment source into well-formed XHTML', function() {
+    // Modeled on a real O'Reilly chapter (titlepage01.html of 9798341662681)
+    const src = '<div id="sbo-rt-content"><section data-type="titlepage" epub:type="titlepage">' +
+      '<h1>Title</h1></section></div>';
+    const result = EinkOptimizer.processChapter(src, {});
+    const err = strictParseError(result);
+    assert(err === null, `output must be well-formed XHTML, got: ${err}`);
+    assertContains(result, 'epub:type="titlepage"');
+    assertContains(result, 'xmlns:epub="http://www.idpf.org/2007/ops"');
+  });
+
+  it('repairs every occurrence, not just the first element', function() {
+    const src = '<div id="sbo-rt-content"><section epub:type="chapter">' +
+      '<aside epub:type="sidebar"><p>Note</p></aside>' +
+      '<a href="#fn1" epub:type="noteref">1</a></section></div>';
+    const result = EinkOptimizer.processChapter(src, {});
+    assert(strictParseError(result) === null, 'all epub:type occurrences must be bound');
+    assertContains(result, 'epub:type="sidebar"');
+    assertContains(result, 'epub:type="noteref"');
+  });
+
+  it('strips attributes with unknown unbindable prefixes', function() {
+    const src = '<div id="sbo-rt-content"><p custom:thing="x">Text</p></div>';
+    const result = EinkOptimizer.processChapter(src, {});
+    assert(strictParseError(result) === null,
+      'an unbindable prefix must not survive into the output');
+    assert(!result.includes('custom:thing'), 'unknown-prefix attribute must be stripped');
+    assertContains(result, 'Text');
+  });
+
+  it('leaves well-formed XHTML with a declared epub namespace untouched', function() {
+    const src = '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" ' +
+      'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>T</title></head>' +
+      '<body><section epub:type="chapter"><p>Body</p></section></body></html>';
+    const result = EinkOptimizer.processChapter(src, {});
+    assert(strictParseError(result) === null, 'already-valid XHTML must stay valid');
+    assertContains(result, 'epub:type="chapter"');
+  });
+
+  it('does not disturb xml:lang (implicitly bound in XML)', function() {
+    const src = '<div id="sbo-rt-content"><p xml:lang="en">Text</p></div>';
+    const result = EinkOptimizer.processChapter(src, {});
+    assert(strictParseError(result) === null, 'xml: prefix needs no declaration');
+    assertContains(result, 'Text');
+  });
+});
