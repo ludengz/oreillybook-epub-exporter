@@ -245,12 +245,19 @@
     const EXT_BY_TYPE = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif' };
     const URL_EXTENSIONS = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' };
     try {
-      // Normalize relative/protocol-relative values against the site origin
-      const absolute = new URL(coverUrl, 'https://learning.oreilly.com').href;
-      if (!PathUtils.isAllowedImageUrl(absolute)) {
-        console.warn('Cover fallback skipped: URL not allowed:', absolute);
-        return null;
-      }
+      // Normalize relative/protocol-relative values against the page's own
+      // origin (the library proxy, when running there), then map a real-host
+      // absolute URL onto it.
+      //
+      // No local allowlist check: on a library proxy the API returns cover_url
+      // already rewritten to the proxy host, and gating here would drop a cover
+      // the SW would have fetched. The SW's fetchImage handler is the single
+      // enforcement point (entry check + post-redirect re-validation) and this
+      // path still fails closed — a refusal throws, and the catch below yields a
+      // coverless but valid EPUB.
+      const absolute = PathUtils.rewriteToPageOrigin(
+        new URL(coverUrl, PathUtils.pageOrigin()).href
+      );
       // Single attempt with a timeout; the cover is an optional asset
       let timeoutId = null;
       const result = await Promise.race([
@@ -587,10 +594,14 @@
           }
 
           // Strategy 4: Fetch absolute URL via background SW (CORS proxy)
-          // Only for absolute URLs — relative paths that failed Strategy 3 cannot be fetched this way
+          // Only for absolute URLs — relative paths that failed Strategy 3 cannot be fetched this way.
+          // On a library proxy, a real-host URL is rewritten onto the page origin
+          // first: the session cookie lives on the proxy domain, so fetching
+          // learning.oreilly.com would be unauthenticated. imgSrc stays the map
+          // key so EinkOptimizer's XHTML rewriting is unaffected.
           if (isAbsolute) {
             try {
-              const { buffer } = await fetchImageViaBackground(resolved);
+              const { buffer } = await fetchImageViaBackground(PathUtils.rewriteToPageOrigin(resolved));
               zip.file(`OEBPS/Images/${imgFilename}`, buffer);
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;

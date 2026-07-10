@@ -77,14 +77,42 @@ describe('PathUtils.isAllowedImageUrl', function() {
     assertEqual(PathUtils.isAllowedImageUrl(undefined), false);
     assertEqual(PathUtils.isAllowedImageUrl(null), false);
   });
-  it('stays in sync with manifest.json host_permissions', async function() {
+  it('accepts the declared library proxy host', function() {
+    assertEqual(PathUtils.isAllowedImageUrl('https://learning-oreilly-com.ezproxy.spl.org/a.png'), true);
+    assertEqual(
+      PathUtils.isAllowedImageUrl('https://learning-oreilly-com.ezproxy.spl.org/api/v2/epubs/x/files/cover.jpg'),
+      true
+    );
+  });
+  it('rejects hosts that merely embed or extend the proxy host', function() {
+    // The proxy host is an EXACT match, never a dot-suffix: Chrome's own
+    // lookalike heuristic flags this hostname shape, and a suffix rule would
+    // hand the SW's credentialed fetcher to anyone who can register a subdomain.
+    assertEqual(
+      PathUtils.isAllowedImageUrl('https://learning-oreilly-com.ezproxy.spl.org.evil.example/a.png'),
+      false
+    );
+    assertEqual(PathUtils.isAllowedImageUrl('https://evil.learning-oreilly-com.ezproxy.spl.org/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('https://learning-oreilly-com.ezproxy.evil.org/a.png'), false);
+    assertEqual(PathUtils.isAllowedImageUrl('http://learning-oreilly-com.ezproxy.spl.org/a.png'), false);
+  });
+  it('stays in sync with manifest.json host_permissions, in both directions', async function() {
     // The allowlist deliberately duplicates host_permissions (the SW cannot
-    // read getManifest in tests) — this test fails if the two drift apart
+    // read getManifest in tests) — this test fails if the two drift apart.
+    // Both directions matter: a host declared but not allowlisted silently
+    // breaks image fetches, and one allowlisted but not declared silently
+    // widens the credentialed SW proxy beyond what Chrome granted.
     const manifest = await (await fetch('../manifest.json')).json();
     const patterns = manifest.host_permissions || [];
     assert(patterns.length >= 3, 'expected host_permissions in manifest.json');
+
+    const manifestExact = new Set();
+    const manifestSuffix = new Set();
     for (const pattern of patterns) {
-      const host = pattern.replace(/^https:\/\//, '').replace(/\/.*$/, '');
+      const host = pattern.replace(/^https:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+      if (host.startsWith('*.')) manifestSuffix.add(host.slice(2));
+      else manifestExact.add(host);
+
       const sample = 'https://' + host.replace(/^\*\./, 'sub.') + '/x.png';
       assertEqual(PathUtils.isAllowedImageUrl(sample), true,
         `host_permissions entry ${pattern} must be accepted by isAllowedImageUrl`);
@@ -94,6 +122,93 @@ describe('PathUtils.isAllowedImageUrl', function() {
           `bare domain of ${pattern} must be accepted (Chrome *. patterns match the host itself)`);
       }
     }
+
+    const sorted = (s) => [...s].sort().join(',');
+    assertEqual(sorted(new Set(PathUtils.ALLOWED_IMAGE_HOSTS)), sorted(manifestExact),
+      'ALLOWED_IMAGE_HOSTS must equal the exact hosts in host_permissions');
+    assertEqual(sorted(new Set(PathUtils.ALLOWED_IMAGE_DOMAIN_SUFFIXES)), sorted(manifestSuffix),
+      'ALLOWED_IMAGE_DOMAIN_SUFFIXES must equal the "*." domains in host_permissions');
+  });
+  it('covers every content_scripts and web_accessible_resources host', async function() {
+    // A library proxy needs all three manifest arrays. Declaring the host for
+    // content_scripts but not host_permissions leaves the content script running
+    // with no image proxy; the reverse leaves the extension inert.
+    const manifest = await (await fetch('../manifest.json')).json();
+    const hostOf = (p) => p.replace(/^https:\/\//, '').replace(/\/.*$/, '').toLowerCase();
+    const declared = new Set((manifest.host_permissions || []).map(hostOf));
+
+    const csHosts = new Set(manifest.content_scripts.flatMap(cs => cs.matches.map(hostOf)));
+    for (const h of csHosts) {
+      assert(declared.has(h), `content_scripts host ${h} is missing from host_permissions`);
+    }
+    const warHosts = new Set(manifest.web_accessible_resources.flatMap(w => w.matches.map(hostOf)));
+    for (const h of csHosts) {
+      assert(warHosts.has(h),
+        `content_scripts host ${h} must appear in web_accessible_resources.matches, ` +
+        'or the e-ink stylesheet cannot be fetched from that origin');
+    }
+  });
+});
+
+describe('PathUtils.rewriteToPageOrigin', function() {
+  const origPageOrigin = PathUtils.pageOrigin;
+  const PROXY = 'https://learning-oreilly-com.ezproxy.spl.org';
+  const withOrigin = (origin, fn) => {
+    PathUtils.pageOrigin = () => origin;
+    try { return fn(); } finally { PathUtils.pageOrigin = origPageOrigin; }
+  };
+
+  it('maps a real-host URL onto a proxy page origin, preserving path and query', function() {
+    withOrigin(PROXY, () => {
+      assertEqual(
+        PathUtils.rewriteToPageOrigin('https://learning.oreilly.com/api/v2/x/y.png?v=3'),
+        PROXY + '/api/v2/x/y.png?v=3'
+      );
+    });
+  });
+  it('is idempotent on an already-proxied URL', function() {
+    withOrigin(PROXY, () => {
+      const already = PROXY + '/api/v2/x/y.png';
+      assertEqual(PathUtils.rewriteToPageOrigin(already), already);
+      assertEqual(PathUtils.rewriteToPageOrigin(PathUtils.rewriteToPageOrigin(already)), already);
+    });
+  });
+  it('never touches CDN or unrelated hosts', function() {
+    withOrigin(PROXY, () => {
+      assertEqual(
+        PathUtils.rewriteToPageOrigin('https://cdn.oreillystatic.com/a.png'),
+        'https://cdn.oreillystatic.com/a.png'
+      );
+      assertEqual(
+        PathUtils.rewriteToPageOrigin('https://www.safaribooksonline.com/a.jpg'),
+        'https://www.safaribooksonline.com/a.jpg'
+      );
+      // Suffix lookalikes of the real host must not be rewritten either
+      assertEqual(
+        PathUtils.rewriteToPageOrigin('https://xlearning.oreilly.com/a.png'),
+        'https://xlearning.oreilly.com/a.png'
+      );
+    });
+  });
+  it('is a no-op in direct mode', function() {
+    withOrigin('https://learning.oreilly.com', () => {
+      const u = 'https://learning.oreilly.com/api/v2/x/y.png';
+      assertEqual(PathUtils.rewriteToPageOrigin(u), u);
+    });
+  });
+  it('passes relative values through for the caller to resolve', function() {
+    withOrigin(PROXY, () => {
+      assertEqual(PathUtils.rewriteToPageOrigin('/api/v2/x.png'), '/api/v2/x.png');
+      assertEqual(PathUtils.rewriteToPageOrigin('images/x.png'), 'images/x.png');
+    });
+  });
+  it('refuses to rewrite onto a non-https page origin', function() {
+    // The test harness itself runs on http://localhost — a downgrade here would
+    // silently strip credentials protection.
+    withOrigin('http://localhost:8765', () => {
+      const u = 'https://learning.oreilly.com/a.png';
+      assertEqual(PathUtils.rewriteToPageOrigin(u), u);
+    });
   });
 });
 

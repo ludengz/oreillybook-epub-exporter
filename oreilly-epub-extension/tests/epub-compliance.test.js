@@ -221,14 +221,23 @@ function coverScenarioFetchMock(origFetch, { isbn, coverUrl, includeCoverImage, 
   };
 }
 
-// Run one full download with the given mocks and unpack the produced EPUB
-async function buildEpubWith({ isbn, fetchMock, fetchImageResponder }) {
+// Run one full download with the given mocks and unpack the produced EPUB.
+// `pageOrigin` stubs PathUtils.pageOrigin() so a run can simulate the real
+// O'Reilly origin or a library-proxy origin. Without it, content.js would see
+// the harness's own http://localhost origin, and every origin-dependent
+// assertion below would be vacuous.
+const DIRECT_ORIGIN = 'https://learning.oreilly.com';
+const PROXY_ORIGIN = 'https://learning-oreilly-com.ezproxy.spl.org';
+
+async function buildEpubWith({ isbn, fetchMock, fetchImageResponder, pageOrigin = DIRECT_ORIGIN }) {
   const origFetch = window.fetch;
   const origExtract = Fetcher.extractIsbn;
   const origClick = HTMLAnchorElement.prototype.click;
+  const origPageOrigin = PathUtils.pageOrigin;
   let blobUrl = null;
   try {
     Fetcher.extractIsbn = () => isbn;
+    PathUtils.pageOrigin = () => pageOrigin;
     window.fetch = fetchMock(origFetch);
     HTMLAnchorElement.prototype.click = function() { blobUrl = this.href; };
     if (fetchImageResponder) ChromeMock.setMessageResponder('fetchImage', fetchImageResponder);
@@ -239,17 +248,23 @@ async function buildEpubWith({ isbn, fetchMock, fetchImageResponder }) {
     await waitFor(() => ChromeMock.sentMessages.some(m => m.action === 'downloadComplete'),
       { timeout: 15000, label: `downloadComplete for ${isbn}` });
 
-    const fetchImageCalls = ChromeMock.sentMessages.filter(m => m.action === 'fetchImage').length;
+    const imageMsgs = ChromeMock.sentMessages.filter(m => m.action === 'fetchImage');
     const completeMsg = ChromeMock.sentMessages.find(m => m.action === 'downloadComplete');
     const buf = await (await origFetch(blobUrl)).arrayBuffer();
     const zip = await JSZip.loadAsync(buf);
     const opf = await zip.file('OEBPS/content.opf').async('string');
     const zipPaths = Object.keys(zip.files).filter(p => !zip.files[p].dir);
-    return { zip, opf, zipPaths, fetchImageCalls, report: completeMsg ? completeMsg.report : null };
+    return {
+      zip, opf, zipPaths,
+      fetchImageCalls: imageMsgs.length,
+      fetchImageUrls: imageMsgs.map(m => m.url),
+      report: completeMsg ? completeMsg.report : null,
+    };
   } finally {
     ChromeMock.clearResponders();
     window.fetch = origFetch;
     Fetcher.extractIsbn = origExtract;
+    PathUtils.pageOrigin = origPageOrigin;
     HTMLAnchorElement.prototype.click = origClick;
   }
 }
@@ -392,15 +407,16 @@ describe('content.js API cover fallback (integration)', function() {
 
   it('normalizes a relative cover_url and strips Content-Type parameters', async function() {
     const isbn = '9781616161616';
-    const { opf, zipPaths } = await buildEpubWith({
+    const { opf, zipPaths, fetchImageUrls } = await buildEpubWith({
       isbn,
       fetchMock: (orig) => coverScenarioFetchMock(orig, {
         isbn, coverUrl: `/library/cover/${isbn}/`, includeCoverImage: false,
       }),
       fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg; charset=binary' }),
     });
-    assert(zipPaths.includes('OEBPS/Images/cover.jpg'),
-      'relative cover_url must resolve against learning.oreilly.com; CT parameters must strip');
+    assertEqual(fetchImageUrls[0], `${DIRECT_ORIGIN}/library/cover/${isbn}/`,
+      'a relative cover_url must resolve against the page origin');
+    assert(zipPaths.includes('OEBPS/Images/cover.jpg'), 'CT parameters must strip');
     assertContains(opf, 'properties="cover-image"');
     assertNoImageOrphans(opf, zipPaths);
   });
@@ -433,6 +449,62 @@ describe('content.js API cover fallback (integration)', function() {
       'HTML bytes must never be packaged under an image extension');
     assert(!zipPaths.some(p => /OEBPS\/Images\/cover\./.test(p)), 'no cover file expected');
     assertNoImageOrphans(opf, zipPaths);
+  });
+
+  // --- Library proxy (EZproxy) origin ---
+  // EZproxy >= 6.0.8 rewrites URLs inside JSON bodies, so cover_url arrives
+  // already pointing at the proxy host. That host is not on the static
+  // allowlist, which is why fetchCoverFallback no longer gates locally: the
+  // SW is the single enforcement point. These tests pin that behaviour.
+
+  it('fetches an already-proxied cover_url on a proxy origin', async function() {
+    const isbn = '9782020202020';
+    const proxiedCover = `${PROXY_ORIGIN}/library/cover/${isbn}/`;
+    const { opf, zipPaths, fetchImageUrls } = await buildEpubWith({
+      isbn,
+      pageOrigin: PROXY_ORIGIN,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, {
+        isbn, coverUrl: proxiedCover, includeCoverImage: false,
+      }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
+    });
+    // Before the local allowlist gate was removed this call never happened and
+    // every library book shipped coverless.
+    assertEqual(fetchImageUrls[0], proxiedCover,
+      'an already-proxied cover_url must reach the SW untouched');
+    assert(zipPaths.includes('OEBPS/Images/cover.jpg'), 'the proxied cover must be packaged');
+    assertContains(opf, 'properties="cover-image"');
+    assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('host-swaps a real-host cover_url onto a proxy origin', async function() {
+    // EZproxy deployments older than 6.0.8 (or with MimeFilter restrictions)
+    // leave real-host URLs in JSON. Fetching learning.oreilly.com from a
+    // proxied page is unauthenticated: the session cookie is on the proxy domain.
+    const isbn = '9782121212121';
+    const { zipPaths, fetchImageUrls } = await buildEpubWith({
+      isbn,
+      pageOrigin: PROXY_ORIGIN,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, {
+        isbn, coverUrl: `https://learning.oreilly.com/covers/${isbn}.jpg`, includeCoverImage: false,
+      }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
+    });
+    assertEqual(fetchImageUrls[0], `${PROXY_ORIGIN}/covers/${isbn}.jpg`,
+      'a real-host cover_url must be rewritten onto the proxy origin');
+    assert(zipPaths.includes('OEBPS/Images/cover.jpg'));
+  });
+
+  it('leaves a real-host cover_url untouched in direct mode', async function() {
+    const isbn = '9782323232323';
+    const coverUrl = `https://learning.oreilly.com/covers/${isbn}.jpg`;
+    const { fetchImageUrls } = await buildEpubWith({
+      isbn,
+      pageOrigin: DIRECT_ORIGIN,
+      fetchMock: (orig) => coverScenarioFetchMock(orig, { isbn, coverUrl, includeCoverImage: false }),
+      fetchImageResponder: () => ({ ok: true, data: TINY_JPG_B64, contentType: 'image/jpeg' }),
+    });
+    assertEqual(fetchImageUrls[0], coverUrl, 'direct mode must make the same fetchImage decision as before');
   });
 
   it('never completes a download cancelled during the cover fetch', async function() {
@@ -612,5 +684,71 @@ describe('content.js OPF metadata proxy assertions (epubcheck stand-ins)', funct
     const { opf } = await getComplianceEpub();
     assert(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(opf),
       'OPF contains XML-1.0-illegal code points');
+  });
+});
+
+// --- Chapter images on a library proxy origin ---
+// An absolute learning.oreilly.com <img> inside chapter HTML must be fetched
+// from the proxy origin, but the ORIGINAL src stays the imageMap key --
+// EinkOptimizer rewrites the XHTML from those keys. Swapping the key would
+// silently break every rewritten <img> in the book.
+
+const REMOTE_IMG_URL = 'https://learning.oreilly.com/assets/remote1.png';
+const REMOTE_IMG_CHAPTER =
+  '<?xml version="1.0" encoding="UTF-8"?>' +
+  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ch 1</title></head>' +
+  '<body><h1>Chapter One</h1><img src="' + REMOTE_IMG_URL + '"/></body></html>';
+
+function remoteImageFetchMock(isbn) {
+  return (origFetch) => async (url) => {
+    url = String(url);
+    if (url.startsWith('blob:')) return origFetch(url);
+    if (url.includes('/api/v2/search/')) {
+      return mockResponse({ jsonBody: { results: [{ title: 'Remote Image Book', authors: ['A'], archive_id: isbn }] } });
+    }
+    if (url.includes('/files/?limit=')) {
+      return mockResponse({ jsonBody: { results: [
+        { full_path: 'ch1.xhtml', kind: 'chapter', media_type: 'application/xhtml+xml' },
+      ], next: null } });
+    }
+    if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body { color: #000; }' });
+    if (url.includes('/files/ch1.xhtml')) return mockResponse({ textBody: REMOTE_IMG_CHAPTER });
+    return mockResponse({ ok: false, status: 404 });
+  };
+}
+
+describe('EPUB compliance: absolute chapter images across origins', function() {
+  it('rewrites the fetch URL onto the proxy origin without disturbing the XHTML key', async function() {
+    const isbn = '9782424242424';
+    const { zip, opf, zipPaths, fetchImageUrls } = await buildEpubWith({
+      isbn,
+      pageOrigin: PROXY_ORIGIN,
+      fetchMock: remoteImageFetchMock(isbn),
+      fetchImageResponder: () => ({ ok: true, data: TINY_PNG_B64, contentType: 'image/png' }),
+    });
+    assertEqual(fetchImageUrls.length, 1, 'exactly one SW image fetch expected');
+    assertEqual(fetchImageUrls[0], PROXY_ORIGIN + '/assets/remote1.png',
+      'Strategy 4 must fetch the proxied URL, never the unauthenticated real host');
+
+    const packaged = zipPaths.filter(p => p.startsWith('OEBPS/Images/'));
+    assertEqual(packaged.length, 1, 'the image must be packaged exactly once');
+    const chapter = await zip.file('OEBPS/Text/chapter_01.xhtml').async('string');
+    const basename = packaged[0].replace('OEBPS/Images/', '');
+    assertContains(chapter, '../Images/' + basename,
+      'the XHTML must point at the packaged file — proof the original src stayed the imageMap key');
+    assert(!chapter.includes('learning-oreilly-com.ezproxy.spl.org'),
+      'the proxy host must never leak into packaged chapter XHTML');
+    assertNoImageOrphans(opf, zipPaths);
+  });
+
+  it('leaves the fetch URL alone in direct mode', async function() {
+    const isbn = '9782525252525';
+    const { fetchImageUrls } = await buildEpubWith({
+      isbn,
+      pageOrigin: DIRECT_ORIGIN,
+      fetchMock: remoteImageFetchMock(isbn),
+      fetchImageResponder: () => ({ ok: true, data: TINY_PNG_B64, contentType: 'image/png' }),
+    });
+    assertEqual(fetchImageUrls[0], REMOTE_IMG_URL, 'direct mode must be byte-identical to before');
   });
 });

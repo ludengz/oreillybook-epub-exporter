@@ -351,8 +351,10 @@ describe('content.js quality report bookkeeping', function() {
     };
     await withNoRetries(async () => {
       await withPatchedEnv(fetchMock, async () => {
-        // 52 images -> 26 phase-1 batches with 500ms pacing: allow ~25s
-        const r = (await runDownload('rep-8', 'downloadComplete', 25000)).report;
+        // 52 images -> 26 phase-1 batches with 500ms pacing: ~12.5s of throttle
+        // alone. 25s left too little headroom and flaked on a loaded machine
+        // (reproduced on master, before the library-proxy changes).
+        const r = (await runDownload('rep-8', 'downloadComplete', 45000)).report;
         assertEqual(r.counts.imagesFailed, 52, 'the total must stay exact beyond the cap');
         assertEqual(r.failures.images.length, 50, 'detail must cap at 50 entries');
       }, '9787000000014');
