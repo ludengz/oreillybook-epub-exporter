@@ -1,9 +1,10 @@
 ---
 title: "feat: Library proxy (EZproxy) support"
 type: feat
-status: active
+status: completed
 date: 2026-07-09
 deepened: 2026-07-09
+completed: 2026-07-10
 ---
 
 # feat: Library proxy (EZproxy) support
@@ -12,7 +13,7 @@ deepened: 2026-07-09
 
 The exporter today only activates on `learning.oreilly.com` — personal subscriptions. Library users reach the same content through hostname-rewriting proxies, e.g. `https://learning-oreilly-com.ezproxy.spl.org/library/view/python-crash-course/9781098156664/f01.xhtml` (Seattle Public Library). The paths, page structure, and `/api/v2/...` endpoints are identical; only the origin differs.
 
-This plan adds the library proxy host as a **static manifest declaration**, then fixes the three things that actually break on a different origin: absolute `learning.oreilly.com` URLs baked into the pipeline, the SW image-proxy allowlist, and EZproxy's session-expiry mode (a 302-to-login that `fetch` follows into a 200 HTML page — which would otherwise be packaged into the EPUB as chapter content).
+This plan adds the library proxy host as a **static manifest declaration**, then fixes the three things that actually break on a different origin: absolute `learning.oreilly.com` URLs baked into the pipeline, the SW image-proxy allowlist, and EZproxy's session-expiry mode (a 302 to a login host that is invisible under `fetch`'s default `redirect: 'follow'` — see Calibration Findings P5 for what live probing showed, which is not what this paragraph originally claimed).
 
 Adding a *different* library is then a one-line manifest edit, documented in the README. A runtime "Enable on this site" flow that would make arbitrary libraries work without editing the manifest was designed and costed during planning, then deliberately deferred — see Alternative Approaches Considered, which preserves its hazards so they don't have to be rediscovered.
 
@@ -24,7 +25,7 @@ What breaks on a proxy origin:
 
 1. **Static host declarations.** `manifest.json` scopes `content_scripts`, `host_permissions`, and `web_accessible_resources` to `learning.oreilly.com`, so the extension is inert on the proxy host.
 2. **Session locality.** The library session cookie lives on the proxy domain (`*.ezproxy.spl.org`); requests to the real `learning.oreilly.com` from the same browser are unauthenticated. Every absolute `learning.oreilly.com` URL in the pipeline (the cover-fallback base, API-returned `cover_url`, chapter-embedded absolute URLs) is a broken path in library mode.
-3. **Proxy failure modes differ.** EZproxy session expiry is not a 401 — it is a 302 to `login.ezproxy.<lib>.org` that `fetch` follows to a 200 HTML login page. Unhandled, that HTML crashes manifest JSON parsing with a cryptic error, or worse, is silently written into the EPUB as a chapter.
+3. **Proxy failure modes differ.** EZproxy session expiry is not a 401 — it is a 302 to `login.ezproxy.<lib>.org`. *(Revised after Unit 1: from a content script that cross-origin redirect is CORS-blocked into a bare `TypeError`, which `_fetchWithRetry` mistakes for a transient network fault and retries with backoff, per file. Where a library's login host is same-origin, `fetch` follows it to a 200 HTML page that crashes manifest JSON parsing or is written into the EPUB as a chapter. Both are covered by the same fix.)*
 
 What already works unchanged (verified by code scan): all API fetches are relative paths against the page origin; pagination `next` is converted to path+query before fetching; `Fetcher.extractIsbn` is path-anchored with no host dependency; all download state is keyed by tabId, not host.
 
@@ -136,7 +137,7 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 **Verification:**
 - The appendix answers all five probes with observed values, each marked confirmed or contradicted, and names the concrete downstream change (declare the CDN host or not; the exact expiry predicate).
 
-- [ ] **Unit 2: Declare the proxy host; normalize origins; extend the allowlist**
+- [x] **Unit 2: Declare the proxy host; normalize origins; extend the allowlist**
 
 **Goal:** The extension activates on the SPL proxy origin and every absolute-URL path in the pipeline resolves against it.
 
@@ -174,7 +175,7 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 **Verification:**
 - New unit and integration tests green; the full suite green; a proxied-origin mocked run yields an epubcheck-clean EPUB with images and cover resolved.
 
-- [ ] **Unit 3: Proxy session-expiry detection**
+- [x] **Unit 3: Proxy session-expiry detection**
 
 **Goal:** An expired library session aborts the download with library-specific guidance instead of packaging a login page.
 
@@ -208,7 +209,7 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 **Verification:**
 - Fetcher suite green with the new cases; the integration fixture proves no login HTML reaches the ZIP; direct-mode 401 handling unchanged.
 
-- [ ] **Unit 4: Regression, docs, and live end-to-end**
+- [x] **Unit 4: Regression, docs, and live end-to-end**
 
 **Goal:** Direct-mode zero-regression proven; library support documented; one real proxied book exported and validated.
 
@@ -229,7 +230,7 @@ Everything else — attemptId guards, `reportByTab`, notifications, the quality 
 - Test expectation: none beyond the suites above — this unit is verification and documentation.
 
 **Verification:**
-- Suite green; both epubcheck runs report 0 fatals / 0 errors / 0 warnings; the live SPL export succeeds and validates; docs updated.
+- **Done 2026-07-10:** 204 browser tests / 0 failed (181 before this feature). epubcheck 5.1.0 on pipeline-generated output: direct-origin build **0/0/0**, proxy-origin build **0/0/0**, and no host string (`ezproxy` or `learning.oreilly.com`) appears in any of the 9 text entries of the proxy-built EPUB. README + CLAUDE.md updated. Live SPL export pending a manual Load-unpacked run by the repo owner (see PR).
 
 ## System-Wide Impact
 

@@ -20,7 +20,7 @@ A Chrome extension that converts O'Reilly Learning books into EPUB format with a
 ## Prerequisites
 
 - Google Chrome (or Chromium-based browser)
-- An active [O'Reilly Learning](https://learning.oreilly.com) subscription
+- Access to [O'Reilly Learning](https://learning.oreilly.com), either through a personal subscription or a library that provides it (see [Library access](#library-access))
 
 ## Installation
 
@@ -39,6 +39,37 @@ A Chrome extension that converts O'Reilly Learning books into EPUB format with a
 3. Click **Download EPUB**
 4. The extension fetches all chapters, images, and stylesheets, then packages them into an EPUB file
 5. The EPUB file downloads automatically when complete
+
+## Library access
+
+Many public and university libraries provide O'Reilly Learning through an [EZproxy](https://help.oclc.org/Library_Management/EZproxy) gateway, which serves the same content from a rewritten hostname — `learning.oreilly.com` becomes `learning-oreilly-com.<proxy-host>`. The extension supports this.
+
+**Out of the box:** Seattle Public Library (`learning-oreilly-com.ezproxy.spl.org`).
+
+### Chrome shows a "Safety warning" the first time
+
+Chrome's lookalike-domain heuristic sees a well-known domain embedded in a subdomain and flags it. The hyphenated shape is exactly what EZproxy must produce to match its wildcard TLS certificate, so the warning is a false positive — but Chrome cannot know that, and **the extension cannot run while the warning is on screen**.
+
+Click **Details → Continue to \<host\> (unsafe)** once. Chrome remembers the choice for that site. This happens even when you follow your library's own link.
+
+### Adding another library
+
+Two files, one hostname:
+
+1. `oreilly-epub-extension/manifest.json` — add `https://learning-oreilly-com.<your-proxy-host>/*` to `host_permissions` and `web_accessible_resources[0].matches`, and both `/library/view/*` and `/library/cover/*` variants to `content_scripts[0].matches`.
+2. `oreilly-epub-extension/lib/path-utils.js` — add the same hostname to `PathUtils.ALLOWED_IMAGE_HOSTS`.
+
+Then reload the unpacked extension. A test (`tests/path-utils.test.js`) fails if you update one file and forget the other.
+
+To find your hostname, open a book through your library and read the address bar.
+
+### What is not supported
+
+- **Proxy-by-port** gateways (`https://ezproxy.example.org:2443/...`) and http-only proxies.
+- Rewriting proxies other than EZproxy (WAM, MUSE) may work if you declare their hostname, but are untested.
+- **OpenAthens / institutional SSO needs no changes**: those log you in on the real `learning.oreilly.com`, which the extension already supports.
+
+The personal-use disclaimer below applies to library access too. Check your library's terms.
 
 ## Popup States
 
