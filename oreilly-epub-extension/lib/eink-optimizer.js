@@ -1,4 +1,44 @@
 const EinkOptimizer = {
+  // Namespaces for attribute prefixes that legitimately appear in O'Reilly
+  // chapter markup but arrive UNBOUND through Fetcher.parseXhtml's text/html
+  // fallback: the HTML parser stores e.g. epub:type as a plain attribute
+  // whose name contains a colon and whose namespaceURI is null, and
+  // XMLSerializer emits it verbatim with no declaration — making the packaged
+  // chapter non-well-formed XML ("Attribute epub:type prefix is unbound").
+  // Newer O'Reilly books use epub:type structural semantics on nearly every
+  // section, so without repair the validator flags nearly every chapter.
+  KNOWN_ATTR_PREFIX_NS: {
+    epub: 'http://www.idpf.org/2007/ops',
+    xlink: 'http://www.w3.org/1999/xlink',
+  },
+
+  // Make colon-named, namespace-less attributes serializable: bind known
+  // prefixes by declaring them on the root (a literal xmlns:* attribute
+  // serializes into exactly the declaration a strict reparse needs), and
+  // strip unknown ones (there is nothing meaningful to bind them to, and an
+  // unbound prefix would fail every conforming XML parser downstream).
+  fixUnboundAttrPrefixes(doc) {
+    const root = doc.documentElement;
+    for (const el of doc.querySelectorAll('*')) {
+      for (const attr of [...el.attributes]) {
+        if (attr.namespaceURI !== null) continue; // properly bound already
+        const colon = attr.name.indexOf(':');
+        if (colon <= 0) continue;
+        const prefix = attr.name.slice(0, colon);
+        // xml: is implicitly bound in XML; xmlns: IS a declaration
+        if (prefix === 'xml' || prefix === 'xmlns') continue;
+        const ns = this.KNOWN_ATTR_PREFIX_NS[prefix];
+        if (ns) {
+          if (!root.hasAttribute('xmlns:' + prefix)) {
+            root.setAttribute('xmlns:' + prefix, ns);
+          }
+        } else {
+          el.removeAttribute(attr.name);
+        }
+      }
+    }
+  },
+
   injectOverrideCss(doc) {
     const head = doc.querySelector('head');
     if (head) {
@@ -59,6 +99,7 @@ const EinkOptimizer = {
     this.rewriteCssLinks(doc);
     this.rewriteImagePaths(doc, imageMap);
     this.injectOverrideCss(doc);
+    this.fixUnboundAttrPrefixes(doc);
 
     if (!doc.documentElement.getAttribute('xmlns')) {
       doc.documentElement.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');

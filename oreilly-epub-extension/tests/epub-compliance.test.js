@@ -752,3 +752,52 @@ describe('EPUB compliance: absolute chapter images across origins', function() {
     assertEqual(fetchImageUrls[0], REMOTE_IMG_URL, 'direct mode must be byte-identical to before');
   });
 });
+
+// --- Real-world fragment chapters with epub:type (newer O'Reilly books) ---
+// Chapters arrive as text/html fragments carrying epub:type attributes. The
+// text/html fallback leaves those attributes namespace-less; without repair
+// the packaged chapter is non-well-formed XML and the validator flags every
+// such chapter ("Attribute epub:type prefix is unbound"), burying a clean
+// download under integrity warnings.
+describe('EPUB compliance: fragment chapters with epub:type', function() {
+  const FRAGMENT_CHAPTER = '<div id="sbo-rt-content">' +
+    '<section data-type="chapter" epub:type="chapter" class="pagenumrestart">' +
+    '<div class="chapter" id="ch1"><h1>Chapter 1</h1>' +
+    '<aside data-type="sidebar" epub:type="sidebar"><p>Note</p></aside>' +
+    '<figure><img alt="fig" src="images/fig1.png" width="100" height="80"></figure>' +
+    '<p>Body text</p></div></section></div>';
+
+  function fragmentFetchMock(isbn) {
+    return (origFetch) => async (url) => {
+      url = String(url);
+      if (url.startsWith('blob:')) return origFetch(url);
+      if (url.includes('/api/v2/search/')) {
+        return mockResponse({ jsonBody: { results: [{ title: 'Fragment Book', authors: ['A'], archive_id: isbn }] } });
+      }
+      if (url.includes('/files/?limit=')) {
+        return mockResponse({ jsonBody: { results: [
+          { full_path: 'ch1.html', kind: 'chapter', media_type: 'text/html' },
+          { full_path: 'images/fig1.png', kind: 'image', media_type: 'image/png' },
+        ], next: null } });
+      }
+      if (url.includes('eink-override.css')) return mockResponse({ textBody: 'body { color: #000; }' });
+      if (url.includes('/files/ch1.html')) return mockResponse({ textBody: FRAGMENT_CHAPTER });
+      if (/\.png$/.test(url)) return mockResponse({ buffer: TINY_PNG });
+      return mockResponse({ ok: false, status: 404 });
+    };
+  }
+
+  it('delivers with zero integrity warnings and a bound epub namespace', async function() {
+    const isbn = '9782626262626';
+    const { zip, report } = await buildEpubWith({ isbn, fetchMock: fragmentFetchMock(isbn) });
+    assertEqual(report.validated, true, 'the validator must have run');
+    assertEqual(report.validationWarnings.length, 0,
+      `a clean fragment-book download must not report integrity warnings, got: ${JSON.stringify(report.validationWarnings)}`);
+    const chapter = await zip.file('OEBPS/Text/chapter_01.xhtml').async('string');
+    assertContains(chapter, 'xmlns:epub="http://www.idpf.org/2007/ops"');
+    assertContains(chapter, 'epub:type="chapter"');
+    // The packaged chapter must satisfy the validator's own strict reparse
+    const strict = new DOMParser().parseFromString(chapter, 'application/xhtml+xml');
+    assert(!strict.querySelector('parsererror'), 'packaged chapter must be well-formed XHTML');
+  });
+});
