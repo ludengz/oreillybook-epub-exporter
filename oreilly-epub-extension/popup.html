@@ -46,11 +46,29 @@
     <button class="btn-primary" disabled>📥 Download EPUB</button>
   </div>
 
+  <div id="state-report" class="state" style="display:none;">
+    <div id="report-header" class="report-header">
+      <span id="report-icon"></span>
+      <span id="report-headline"></span>
+    </div>
+    <div id="report-book-title" class="book-title-small"></div>
+    <div id="report-body" class="report-body"></div>
+    <button id="btn-redownload" class="btn-primary">📥 Re-download book</button>
+    <div id="redownload-note" class="progress-text" style="display:none;"></div>
+  </div>
+
   <div id="state-error" class="state" style="display:none;">
     <div class="notice error">
       <div class="notice-text" id="error-text"></div>
     </div>
+    <div id="error-report-counts" class="progress-text" style="display:none;"></div>
+    <details id="error-details" style="display:none;">
+      <summary>Details</summary>
+      <pre id="error-details-text"></pre>
+    </details>
+    <button id="btn-copy-error" class="btn-primary" style="display:none;">Copy error details</button>
     <button id="btn-retry" class="btn-primary">Retry</button>
+    <div id="retry-note" class="progress-text" style="display:none;"></div>
   </div>
 
   <script src="popup.js"></script>

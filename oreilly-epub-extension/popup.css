@@ -20,3 +20,25 @@ body { width: 300px; font-family: system-ui, -apple-system, sans-serif; font-siz
 .notice-icon { font-size: 20px; margin-bottom: 4px; }
 .notice-text { font-size: 13px; color: #92400e; }
 .notice.error .notice-text { color: #dc2626; }
+
+/* Quality report panel */
+.report-header { display: flex; align-items: center; gap: 6px; border-radius: 6px; padding: 8px 10px; font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.report-header.report-ok { background: #ecfdf5; color: #047857; }
+.report-header.report-warn { background: #fef3c7; color: #92400e; }
+.report-body { max-height: 240px; overflow-y: auto; margin-bottom: 12px; }
+.report-summary { font-size: 12px; color: #555; margin-bottom: 6px; }
+.report-notice { font-size: 11px; color: #92400e; background: #fef3c7; border-radius: 4px; padding: 4px 6px; margin: 4px 0; }
+.report-body details { margin: 4px 0; font-size: 12px; }
+.report-body summary { cursor: pointer; color: #b45309; font-weight: 600; }
+.report-list { margin: 4px 0 4px 14px; color: #666; font-size: 11px; word-break: break-all; }
+.report-list div { margin: 2px 0; }
+.report-more { font-style: italic; }
+#redownload-note, #retry-note { margin-top: 6px; text-align: center; }
+
+/* Error view extras */
+#error-report-counts { margin: 8px 0 0; text-align: center; }
+#error-details { font-size: 11px; margin: 8px 0; }
+#error-details summary { cursor: pointer; color: #666; }
+#error-details pre { white-space: pre-wrap; word-break: break-all; background: #f7f7f7; border-radius: 4px; padding: 6px; margin-top: 4px; max-height: 120px; overflow-y: auto; }
+#btn-copy-error { margin: 8px 0; }
+#state-error .btn-secondary { margin-top: 4px; }

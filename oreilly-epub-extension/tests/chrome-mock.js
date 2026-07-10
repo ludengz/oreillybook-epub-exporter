@@ -11,8 +11,14 @@
   const sentMessages = [];
   const badgeEvents = [];
   const tabRemovedListeners = [];
+  const notificationEvents = [];
+  const notificationClickListeners = [];
+  const notificationClosedListeners = [];
+  const connectListeners = [];
+  const focusEvents = [];
   let storageStore = {};
   let tabsSendMessageImpl = async () => undefined;
+  let tabsGetImpl = async (tabId) => ({ id: tabId, windowId: 100 });
   let messageResponders = {};
 
   window.chrome = Object.assign(window.chrome || {}, {
@@ -32,6 +38,9 @@
         }
         return Promise.resolve();
       },
+      onConnect: {
+        addListener(fn) { connectListeners.push(fn); },
+      },
       getURL(path) { return path; },
     },
     storage: {
@@ -43,12 +52,22 @@
     tabs: {
       onRemoved: { addListener(fn) { tabRemovedListeners.push(fn); } },
       sendMessage(tabId, message) { return tabsSendMessageImpl(tabId, message); },
+      get(tabId) { return tabsGetImpl(tabId); },
+      update(tabId, props) { focusEvents.push({ kind: 'tab', tabId, ...props }); return Promise.resolve(); },
+    },
+    windows: {
+      update(windowId, props) { focusEvents.push({ kind: 'window', windowId, ...props }); return Promise.resolve(); },
     },
     action: {
       setBadgeText(details) { badgeEvents.push({ kind: 'text', ...details }); },
       setBadgeBackgroundColor(details) { badgeEvents.push({ kind: 'color', ...details }); },
     },
-    notifications: { create() {} },
+    notifications: {
+      create(id, options) { notificationEvents.push({ id, ...options }); },
+      clear() {},
+      onClicked: { addListener(fn) { notificationClickListeners.push(fn); } },
+      onClosed: { addListener(fn) { notificationClosedListeners.push(fn); } },
+    },
   });
 
   window.ChromeMock = {
@@ -73,6 +92,33 @@
     // Fire chrome.tabs.onRemoved listeners; resolves after all handlers settle
     async fireTabRemoved(tabId) {
       await Promise.all(tabRemovedListeners.map(fn => Promise.resolve(fn(tabId))));
+    },
+    notificationEvents,
+    clearNotificationEvents() { notificationEvents.length = 0; },
+    async fireNotificationClicked(id) {
+      await Promise.all(notificationClickListeners.map(fn => Promise.resolve(fn(id))));
+    },
+    async fireNotificationClosed(id) {
+      await Promise.all(notificationClosedListeners.map(fn => Promise.resolve(fn(id))));
+    },
+    focusEvents,
+    clearFocusEvents() { focusEvents.length = 0; },
+    setTabsGet(fn) { tabsGetImpl = fn; },
+    // Simulate the popup opening its presence port and reporting its tab.
+    // Returns a handle whose disconnect() fires the port's onDisconnect.
+    connectPopup(viewingTabId) {
+      const messageListeners = [];
+      const disconnectListeners = [];
+      const port = {
+        name: 'popup',
+        onMessage: { addListener(fn) { messageListeners.push(fn); } },
+        onDisconnect: { addListener(fn) { disconnectListeners.push(fn); } },
+        postMessage(msg) { messageListeners.forEach(fn => fn(msg)); },
+        disconnect() { disconnectListeners.forEach(fn => fn()); },
+      };
+      connectListeners.forEach(fn => fn(port));
+      port.postMessage({ action: 'popupViewing', tabId: viewingTabId });
+      return port;
     },
   };
 

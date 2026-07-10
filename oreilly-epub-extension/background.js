@@ -59,6 +59,80 @@ async function setTabBookInfo(tabId, bookInfo) {
   await chrome.storage.session.set({ state: { ...state, bookInfoByTab } });
 }
 
+// --- Popup presence & system notifications ---------------------------------
+// The popup opens a "popup" port on load and reports which tab it shows.
+// Port disconnect is the reliable popup-closed signal in MV3. A terminal
+// notification is suppressed only when a connected popup is showing the
+// affected tab — a popup open on another tab must not swallow the signal.
+// (Module state resets with the SW; worst case is one redundant
+// notification, never a lost one.)
+let popupPresence = null; // { viewingTabId }
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'popup') return;
+  port.onMessage.addListener((msg) => {
+    if (msg && msg.action === 'popupViewing') {
+      popupPresence = { viewingTabId: msg.tabId };
+    }
+  });
+  port.onDisconnect.addListener(() => { popupPresence = null; });
+});
+
+// notificationId -> tabId survives SW restarts between create and click
+async function rememberNotificationTab(notificationId, tabId) {
+  const stored = await chrome.storage.session.get('notificationTabs');
+  const map = stored.notificationTabs || {};
+  map[notificationId] = tabId;
+  await chrome.storage.session.set({ notificationTabs: map });
+}
+
+function reportSummaryText(report) {
+  if (!report || !report.counts) return 'Download complete.';
+  const c = report.counts;
+  const problems = (c.chaptersPlaceholder || 0) + (c.imagesFailed || 0)
+    + (c.cssFailed || 0) + (report.validationWarnings || []).length;
+  const base = `${c.chaptersOk || 0} chapters, ${c.imagesOk || 0} images downloaded.`;
+  return problems ? `${base} ${problems} issue(s) — see the popup report.` : base;
+}
+
+async function notifyTerminal(tabId, title, messageText) {
+  if (popupPresence && popupPresence.viewingTabId === tabId) return;
+  const notificationId = `oreilly-epub-${Date.now()}-${tabId}`;
+  await rememberNotificationTab(notificationId, tabId);
+  chrome.notifications.create(notificationId, {
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title,
+    message: messageText,
+  });
+}
+
+chrome.notifications.onClicked.addListener(async (notificationId) => {
+  const stored = await chrome.storage.session.get('notificationTabs');
+  const tabId = (stored.notificationTabs || {})[notificationId];
+  if (tabId == null) return;
+  try {
+    // Resolve the tab's CURRENT window at click time — it may have moved
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.windows.update(tab.windowId, { focused: true });
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (e) {
+    // Tab is gone — graceful no-op
+  }
+  chrome.notifications.clear(notificationId);
+});
+
+// Clean map entries only when their notification goes away, so still-visible
+// older notifications keep working across later downloads
+chrome.notifications.onClosed.addListener(async (notificationId) => {
+  const stored = await chrome.storage.session.get('notificationTabs');
+  const map = stored.notificationTabs || {};
+  if (map[notificationId] != null) {
+    delete map[notificationId];
+    await chrome.storage.session.set({ notificationTabs: map });
+  }
+});
+
 async function removeTabBookInfo(tabId) {
   const state = await getState();
   const bookInfoByTab = { ...state.bookInfoByTab };
@@ -101,6 +175,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           downloadingBookInfo: st.downloadingTabId
             ? (st.bookInfoByTab[st.downloadingTabId] || null)
             : null,
+          report: tabId ? ((st.reportByTab || {})[tabId] || null) : null,
         });
         return;
       }
@@ -212,6 +287,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           action: 'downloadComplete',
           tabId: completedTabId,
         }).catch(() => {});
+        const bookTitle = message.report && message.report.bookTitle
+          ? message.report.bookTitle : 'Book';
+        await notifyTerminal(completedTabId,
+          `Download complete: ${bookTitle}`, reportSummaryText(message.report));
         sendResponse({ ok: true });
         return;
       }
@@ -237,14 +316,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           tabId: st.downloadingTabId,
           error: message.error,
         }).catch(() => {});
-        if (message.error && message.error.includes('Session expired')) {
-          chrome.notifications.create({
-            type: 'basic',
-            iconUrl: 'icons/icon128.png',
-            title: 'O\'Reilly EPUB Exporter',
-            message: 'Session expired. Please log in to O\'Reilly and try again.',
-          });
-        }
+        // Generic failure notification (the old session-expiry special case
+        // is merged here). Cancel sends no downloadError, so never notifies.
+        const errorTitle = message.errorKind === 'validation'
+          ? 'Download blocked: EPUB integrity error'
+          : message.error && message.error.includes('Session expired')
+            ? 'Session expired'
+            : 'Download failed';
+        await notifyTerminal(st.downloadingTabId, errorTitle, message.error || 'Unknown error');
         sendResponse({ ok: true });
         return;
       }
