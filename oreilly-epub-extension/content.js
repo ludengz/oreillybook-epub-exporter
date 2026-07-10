@@ -169,6 +169,24 @@
     if (log.css.length < FAILURE_DETAIL_CAP) log.css.push(path);
   }
 
+  // On a library proxy the session belongs to the proxy, not to O'Reilly:
+  // telling a library user to "log in to O'Reilly" sends them to a site where
+  // they have no account. Both variants keep the "Session expired." prefix that
+  // the SW's notification title falls back to matching.
+  // 'direct' on learning.oreilly.com, 'proxy' on a declared library host. The
+  // download behaves differently on each (error copy, URL rewriting, the SW
+  // allowlist host), so the mode is carried as structured report data rather
+  // than left inferable only from the English error string.
+  function pageMode() {
+    return PathUtils.pageOrigin() === 'https://' + PathUtils.DIRECT_HOST ? 'direct' : 'proxy';
+  }
+
+  function sessionExpiredMessage() {
+    return pageMode() === 'direct'
+      ? 'Session expired. Please log in to O\'Reilly and try again.'
+      : 'Session expired. Sign in again through your library\'s portal, reload this page, and retry.';
+  }
+
   // A fatal integrity violation blocks delivery: the error carries the full
   // violation list; the user-facing message caps at three entries.
   function validationError(violations) {
@@ -189,6 +207,11 @@
       bookTitle,
       timestamp: new Date().toISOString(),
       outcome,
+      // 'direct' | 'proxy' — lets a consumer distinguish an expired library
+      // session from an expired O'Reilly session (both errorKind 'session')
+      // by composing errorKind==='session' && mode==='proxy', instead of
+      // substring-matching the user-facing error prose.
+      mode: pageMode(),
       errorKind: errorKind || null,
       validated: !!validated,
       validationWarnings: validationWarnings || [],
@@ -245,12 +268,19 @@
     const EXT_BY_TYPE = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif' };
     const URL_EXTENSIONS = { jpg: 'jpg', jpeg: 'jpg', png: 'png', gif: 'gif' };
     try {
-      // Normalize relative/protocol-relative values against the site origin
-      const absolute = new URL(coverUrl, 'https://learning.oreilly.com').href;
-      if (!PathUtils.isAllowedImageUrl(absolute)) {
-        console.warn('Cover fallback skipped: URL not allowed:', absolute);
-        return null;
-      }
+      // Normalize relative/protocol-relative values against the page's own
+      // origin (the library proxy, when running there), then map a real-host
+      // absolute URL onto it.
+      //
+      // No local allowlist check: on a library proxy the API returns cover_url
+      // already rewritten to the proxy host, and gating here would drop a cover
+      // the SW would have fetched. The SW's fetchImage handler is the single
+      // enforcement point (entry check + post-redirect re-validation) and this
+      // path still fails closed — a refusal throws, and the catch below yields a
+      // coverless but valid EPUB.
+      const absolute = PathUtils.rewriteToPageOrigin(
+        new URL(coverUrl, PathUtils.pageOrigin()).href
+      );
       // Single attempt with a timeout; the cover is an optional asset
       let timeoutId = null;
       const result = await Promise.race([
@@ -309,8 +339,11 @@
       const allFiles = [];
       let nextUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
       while (nextUrl) {
-        const filesRes = await fetch(nextUrl, { credentials: 'include', signal });
-        if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
+        // Via _fetchWithRetry, not a bare fetch: this is the first API call of
+        // a download, so an expired session lands here first. A bare fetch
+        // would follow a proxy login redirect into a 200 HTML page, pass the
+        // `.ok` check, and throw inside .json() with a cryptic SyntaxError.
+        const filesRes = await Fetcher._fetchWithRetry(nextUrl, { signal });
         const filesData = await filesRes.json();
         const results = filesData.results || filesData;
         allFiles.push(...(Array.isArray(results) ? results : []));
@@ -364,9 +397,7 @@
       chrome.runtime.sendMessage({
         action: 'downloadError',
         attemptId: currentAttemptId,
-        error: err.message === 'SESSION_EXPIRED'
-          ? 'Session expired. Please log in to O\'Reilly and try again.'
-          : err.message,
+        error: err.message === 'SESSION_EXPIRED' ? sessionExpiredMessage() : err.message,
         errorKind,
         report: buildReport(failureLog, {
           isbn,
@@ -587,10 +618,14 @@
           }
 
           // Strategy 4: Fetch absolute URL via background SW (CORS proxy)
-          // Only for absolute URLs — relative paths that failed Strategy 3 cannot be fetched this way
+          // Only for absolute URLs — relative paths that failed Strategy 3 cannot be fetched this way.
+          // On a library proxy, a real-host URL is rewritten onto the page origin
+          // first: the session cookie lives on the proxy domain, so fetching
+          // learning.oreilly.com would be unauthenticated. imgSrc stays the map
+          // key so EinkOptimizer's XHTML rewriting is unaffected.
           if (isAbsolute) {
             try {
-              const { buffer } = await fetchImageViaBackground(resolved);
+              const { buffer } = await fetchImageViaBackground(PathUtils.rewriteToPageOrigin(resolved));
               zip.file(`OEBPS/Images/${imgFilename}`, buffer);
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;

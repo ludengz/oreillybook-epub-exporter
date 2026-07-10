@@ -101,3 +101,81 @@ describe('Fetcher.parseXhtml', function() {
     assert(doc.querySelector('p') !== null, 'should parse with text/html fallback');
   });
 });
+
+// --- Session expiry detection -------------------------------------------
+// A library proxy (EZproxy) answers an unauthenticated request with a 302 to
+// its login host. From a content script that redirect is cross-origin, so
+// `redirect: 'follow'` never yields a readable response -- CORS turns it into
+// an indistinguishable TypeError. Issuing the request with `redirect: 'manual'`
+// surfaces it as an opaque redirect instead, which is the only observable
+// signal, and works whether the login host is same-origin or not.
+
+describe('Fetcher._fetchWithRetry session expiry', function() {
+  async function withFetch(impl, body) {
+    const orig = window.fetch;
+    const calls = [];
+    window.fetch = async (url, init) => { calls.push({ url: String(url), init }); return impl(calls.length); };
+    try { return await body(calls); } finally { window.fetch = orig; }
+  }
+  async function expectThrows(fn) {
+    try { await fn(); } catch (e) { return e; }
+    throw new Error('expected a throw, got none');
+  }
+  const okResponse = (over = {}) => Object.assign({
+    ok: true, status: 200, type: 'basic', headers: new Headers(),
+    text: async () => 'body', json: async () => ({}),
+  }, over);
+
+  it('still throws SESSION_EXPIRED on HTTP 401 (direct mode)', async function() {
+    await withFetch(() => okResponse({ ok: false, status: 401 }), async () => {
+      const err = await expectThrows(() => Fetcher._fetchWithRetry('/api/v2/x', { maxRetries: 0 }));
+      assertEqual(err.message, 'SESSION_EXPIRED');
+    });
+  });
+
+  it('throws SESSION_EXPIRED on an opaque redirect', async function() {
+    // EZproxy's 302 to login.ezproxy.<lib>.org, seen through redirect:'manual'
+    await withFetch(() => okResponse({ ok: false, status: 0, type: 'opaqueredirect' }), async () => {
+      const err = await expectThrows(() => Fetcher._fetchWithRetry('/api/v2/x', { maxRetries: 3 }));
+      assertEqual(err.message, 'SESSION_EXPIRED');
+    });
+  });
+
+  it('does not spend retries on an opaque redirect', async function() {
+    await withFetch(() => okResponse({ ok: false, status: 0, type: 'opaqueredirect' }), async (calls) => {
+      await expectThrows(() => Fetcher._fetchWithRetry('/api/v2/x', { maxRetries: 3 }));
+      assertEqual(calls.length, 1, 'an expired session must fail fast, not retry 4x with backoff');
+    });
+  });
+
+  it('issues requests with redirect: manual', async function() {
+    // Guards the whole mechanism: a refactor back to the default 'follow'
+    // would make expiry unobservable again, silently.
+    await withFetch(() => okResponse(), async (calls) => {
+      await Fetcher._fetchWithRetry('/api/v2/x', { maxRetries: 0 });
+      assertEqual(calls[0].init.redirect, 'manual');
+      assertEqual(calls[0].init.credentials, 'include');
+    });
+  });
+
+  it('accepts an authenticated 200 that answers text/html', async function() {
+    // Chapter endpoints legitimately serve text/html under /api/. Treating that
+    // as expiry -- as an earlier draft of this feature proposed -- would fail
+    // every chapter of every book, in both direct and proxy mode.
+    const headers = new Headers({ 'content-type': 'text/html; charset=utf-8' });
+    await withFetch(() => okResponse({ headers }), async () => {
+      const res = await Fetcher._fetchWithRetry('/api/v2/epubs/urn:orm:book:1/files/ch1.xhtml', { maxRetries: 0 });
+      assertEqual(res.status, 200);
+      assertEqual(res.headers.get('content-type'), 'text/html; charset=utf-8');
+    });
+  });
+
+  it('retries a genuine network TypeError and rethrows it as a non-session error', async function() {
+    await withFetch(() => { throw new TypeError('Failed to fetch'); }, async (calls) => {
+      const err = await expectThrows(() => Fetcher._fetchWithRetry('/api/v2/x', { maxRetries: 1 }));
+      assertEqual(err.constructor.name, 'TypeError');
+      assert(err.message !== 'SESSION_EXPIRED', 'offline must not masquerade as an expired session');
+      assertEqual(calls.length, 2, 'a transient fault is still retried');
+    });
+  });
+});

@@ -30,20 +30,73 @@ const PathUtils = {
     return { resolved: this.normalizePath(combined), isAbsolute: false };
   },
 
+  // The canonical direct O'Reilly host. Single source of truth for the three
+  // places that must agree: the allowlist below, rewriteToPageOrigin's
+  // "is this a real-host URL" check, and sessionExpiredMessage's direct/proxy
+  // branch. Kept as a hostname (no scheme); prefix 'https://' where an origin
+  // is needed.
+  DIRECT_HOST: 'learning.oreilly.com',
+
+  // Exact hostnames for credentialed image fetches. Library proxy hosts belong
+  // here and never in the suffix list: a dot-suffix rule would also accept
+  // "learning-oreilly-com.ezproxy.spl.org.evil.example".
+  ALLOWED_IMAGE_HOSTS: [
+    'learning.oreilly.com',
+    'learning-oreilly-com.ezproxy.spl.org',
+  ],
+
+  // Dot-suffix domains, matching manifest.json's "https://*.domain/*" patterns
+  // (which also match the bare domain).
+  ALLOWED_IMAGE_DOMAIN_SUFFIXES: ['oreillystatic.com', 'safaribooksonline.com'],
+
   // Allowlist for credentialed image fetches, mirroring manifest.json
   // host_permissions. Exact-or-dot-suffix matching only — substring checks
   // would let "oreillystatic.com.evil.example" through. Shared by content.js
   // and background.js (the SW loads this file via guarded importScripts).
+  // A test asserts the two lists above stay in sync with host_permissions in
+  // both directions; adding a library to one place only fails loudly.
   isAllowedImageUrl(url) {
     let u;
     try { u = new URL(url); } catch (e) { return false; }
     if (u.protocol !== 'https:') return false;
     const host = u.hostname.toLowerCase();
-    if (host === 'learning.oreilly.com') return true;
-    for (const domain of ['oreillystatic.com', 'safaribooksonline.com']) {
+    if (this.ALLOWED_IMAGE_HOSTS.includes(host)) return true;
+    for (const domain of this.ALLOWED_IMAGE_DOMAIN_SUFFIXES) {
       if (host === domain || host.endsWith('.' + domain)) return true;
     }
     return false;
+  },
+
+  // The origin of the page the content script runs in. A seam, not a helper:
+  // tests stub it to simulate a library-proxy origin. Meaningless in the
+  // service worker, where `location` is the extension's own origin — which is
+  // why rewriteToPageOrigin is only ever called from content.js.
+  pageOrigin() {
+    return location.origin;
+  },
+
+  // Rewrite an absolute learning.oreilly.com URL onto the page's own origin.
+  //
+  // DEFENSIVE ONLY. EZproxy >= 6.0.8 rewrites URLs inside JSON response bodies,
+  // so on the declared SPL proxy every cover_url and files[].url already arrives
+  // proxied and this is a no-op (observed 2026-07-10). It earns its keep on
+  // deployments that leave real-host URLs in API responses: there, fetching
+  // learning.oreilly.com from a proxied page reaches an unauthenticated origin,
+  // because the library session cookie lives on the proxy domain.
+  //
+  // Idempotent on already-proxied URLs, and never touches CDN hosts. Only the
+  // fetch URL is rewritten — callers must keep the original src as the imageMap
+  // key, since EinkOptimizer rewrites chapter XHTML from those keys.
+  rewriteToPageOrigin(url) {
+    let u, base;
+    try { u = new URL(url); } catch (e) { return url; } // relative: caller resolves
+    try { base = new URL(this.pageOrigin()); } catch (e) { return url; }
+    if (base.protocol !== 'https:') return url; // never downgrade or leave https
+    if (u.hostname.toLowerCase() !== this.DIRECT_HOST) return url;
+    if (u.origin === base.origin) return url; // direct mode
+    u.protocol = base.protocol;
+    u.host = base.host;
+    return u.href;
   },
 
   // Sanitize a book title into a download filename stem. Preserves Unicode,

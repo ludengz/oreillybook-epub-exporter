@@ -6,6 +6,7 @@
   "permissions": ["activeTab", "notifications", "storage"],
   "host_permissions": [
     "https://learning.oreilly.com/*",
+    "https://learning-oreilly-com.ezproxy.spl.org/*",
     "https://*.oreillystatic.com/*",
     "https://*.safaribooksonline.com/*"
   ],
@@ -23,7 +24,9 @@
   "content_scripts": [{
     "matches": [
       "https://learning.oreilly.com/library/view/*",
-      "https://learning.oreilly.com/library/cover/*"
+      "https://learning.oreilly.com/library/cover/*",
+      "https://learning-oreilly-com.ezproxy.spl.org/library/view/*",
+      "https://learning-oreilly-com.ezproxy.spl.org/library/cover/*"
     ],
     "js": [
       "lib/jszip.min.js",
@@ -37,6 +40,9 @@
   }],
   "web_accessible_resources": [{
     "resources": ["styles/eink-override.css"],
-    "matches": ["https://learning.oreilly.com/*"]
+    "matches": [
+      "https://learning.oreilly.com/*",
+      "https://learning-oreilly-com.ezproxy.spl.org/*"
+    ]
   }]
 }
