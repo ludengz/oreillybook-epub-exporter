@@ -204,7 +204,7 @@ If this put your library's O'Reilly catalog on your e-reader, a ⭐ helps other 
 
 ## License
 
-[MIT](LICENSE) © Ludeng Zhao. The code is fully open and auditable — what you unzip is what runs.
+[MIT](LICENSE). The code is fully open and auditable — what you unzip is what runs.
 
 ## Disclaimer
 
