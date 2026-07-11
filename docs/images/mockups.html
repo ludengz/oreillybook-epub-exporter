@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Popup State Mockups</title>
+<style>
+body { background: #f0f0f0; font-family: system-ui, -apple-system, sans-serif; display: flex; align-items: flex-start; gap: 24px; padding: 24px; flex-wrap: wrap; }
+.mockup { background: #fff; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,0.15); overflow: hidden; width: 300px; min-height: 240px; }
+.mockup-label { background: #333; color: #fff; font-size: 11px; padding: 6px 12px; text-align: center; font-weight: 600; letter-spacing: 0.5px; }
+
+/* Popup styles copied from popup.css */
+.popup * { margin: 0; padding: 0; box-sizing: border-box; }
+.popup { width: 300px; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; color: #333; }
+.header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
+.logo { width: 28px; height: 28px; background: #d44; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 14px; }
+.title { font-weight: 600; font-size: 14px; }
+.state { padding: 0 16px 16px; }
+.book-info { background: #f7f7f7; border-radius: 6px; padding: 10px; margin-bottom: 12px; }
+.book-title { font-weight: 600; font-size: 13px; color: #222; margin-bottom: 2px; }
+.book-title-small { font-weight: 600; font-size: 13px; color: #222; margin-bottom: 6px; }
+.book-authors { font-size: 11px; color: #888; }
+.btn-primary { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer; }
+.btn-secondary { width: 100%; background: #f3f4f6; color: #666; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-weight: 600; font-size: 13px; cursor: pointer; }
+.progress-bar { background: #e0e0e0; border-radius: 4px; height: 8px; margin-bottom: 4px; }
+.progress-fill { background: #2563eb; border-radius: 4px; height: 8px; transition: width 0.3s ease; }
+.progress-text { font-size: 11px; color: #888; }
+.notice { background: #fef3c7; border-radius: 6px; padding: 12px; text-align: center; }
+.notice.error { background: #fee; }
+.notice-icon { font-size: 20px; margin-bottom: 4px; }
+.notice-text { font-size: 13px; color: #92400e; }
+.notice.error .notice-text { color: #dc2626; }
+
+/* Quality report panel (copied from popup.css) */
+.report-header { display: flex; align-items: center; gap: 6px; border-radius: 6px; padding: 8px 10px; font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.report-header.report-ok { background: #ecfdf5; color: #047857; }
+.report-header.report-warn { background: #fef3c7; color: #92400e; }
+.report-body { margin-bottom: 12px; }
+.report-title { font-weight: 600; font-size: 13px; color: #222; margin-bottom: 4px; }
+.report-summary { font-size: 12px; color: #555; margin-bottom: 6px; }
+.report-notice { font-size: 11px; color: #92400e; background: #fef3c7; border-radius: 4px; padding: 4px 6px; margin: 4px 0; }
+.report-body details { margin: 4px 0; font-size: 12px; }
+.report-body summary { cursor: pointer; color: #b45309; font-weight: 600; }
+.report-list { margin: 4px 0 4px 14px; color: #666; font-size: 11px; }
+.report-list div { margin: 2px 0; }
+</style>
+</head>
+<body>
+
+<!-- State 1: Not on O'Reilly -->
+<div class="mockup" id="mock-not-oreilly">
+  <div class="mockup-label">NOT ON O'REILLY PAGE</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="notice">
+        <div class="notice-icon">📖</div>
+        <div class="notice-text">Navigate to an O'Reilly book page to get started</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- State 2: Ready -->
+<div class="mockup" id="mock-ready">
+  <div class="mockup-label">BOOK DETECTED — READY</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="book-info">
+        <div class="book-title">Learning Python, 6th Edition</div>
+        <div class="book-authors">Mark Lutz</div>
+      </div>
+      <button class="btn-primary">📥 Download EPUB</button>
+    </div>
+  </div>
+</div>
+
+<!-- State 3: Downloading -->
+<div class="mockup" id="mock-downloading">
+  <div class="mockup-label">DOWNLOADING</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="book-info">
+        <div class="book-title-small">Downloading...</div>
+        <div class="progress-bar"><div class="progress-fill" style="width: 48%"></div></div>
+        <div class="progress-text">Chapter 12/25 · Images: 34/67</div>
+      </div>
+      <button class="btn-secondary">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- State 4: Error -->
+<div class="mockup" id="mock-error">
+  <div class="mockup-label">ERROR</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="notice error">
+        <div class="notice-text">Session expired. Please log in to O'Reilly and try again.</div>
+      </div>
+      <button class="btn-primary" style="margin-top: 12px;">Retry</button>
+    </div>
+  </div>
+</div>
+
+<!-- State 5: Download complete — clean report -->
+<div class="mockup" id="mock-report-clean">
+  <div class="mockup-label">DOWNLOAD COMPLETE — REPORT</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="report-header report-ok">✓ Everything downloaded</div>
+      <div class="report-body">
+        <div class="report-title">Download report for "Learning Python, 6th Edition"</div>
+        <div class="report-summary">25 chapters OK · 67 images OK</div>
+      </div>
+      <button class="btn-primary">Re-download book</button>
+    </div>
+  </div>
+</div>
+
+<!-- State 6: Report with issues -->
+<div class="mockup" id="mock-report-issues">
+  <div class="mockup-label">REPORT — ISSUES FOUND</div>
+  <div class="popup">
+    <div class="header">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="state">
+      <div class="report-header report-warn">⚠ 5 issues found</div>
+      <div class="report-body">
+        <div class="report-title">Download report for "Learning Python, 6th Edition"</div>
+        <div class="report-summary">23 chapters OK · 61 images OK</div>
+        <div class="report-notice">No cover image could be found.</div>
+        <details open>
+          <summary>2 chapters missing (placeholder pages)</summary>
+          <div class="report-list"><div>Chapter 3: ch03.xhtml</div><div>Chapter 9: ch09.xhtml</div></div>
+        </details>
+        <details>
+          <summary>3 images failed</summary>
+        </details>
+      </div>
+      <button class="btn-primary">Re-download book</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
