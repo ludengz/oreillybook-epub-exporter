@@ -1,12 +1,28 @@
 # O'Reilly EPUB Exporter
 
-A Chrome extension that converts O'Reilly Learning books into EPUB format with a single click, optimized for e-ink readers (Boox).
+A Chrome extension that converts O'Reilly Learning books into clean, e-ink-optimized EPUBs with a single click — **whether you pay for O'Reilly or read it free through your library**.
+
+## Two ways to read O'Reilly, one extension
+
+Most tools assume a personal `learning.oreilly.com` subscription. But many public and university libraries offer the **complete O'Reilly catalog free with a library card**, served through an EZproxy gateway on a different hostname. This extension is built for both:
+
+| | Personal subscription | Library card (EZproxy) |
+|---|---|---|
+| **Where you read** | `learning.oreilly.com` | `learning-oreilly-com.<library-proxy>` |
+| **Cost** | paid subscription | **free** with a library card |
+| **Supported out of the box** | ✅ | ✅ Seattle Public Library |
+| **Other libraries** | — | a [two-line edit](#adding-another-library) |
+| **Setup quirk** | none | a one-time Chrome ["Safety warning" click-through](#chrome-shows-a-safety-warning-the-first-time) |
+
+Everything else is identical in both modes: the same one-click download, the same quality report, the same validated EPUB. Session expiry is even diagnosed per mode — a library user is told to sign back in through the library portal, not to "log in to O'Reilly".
 
 ## Features
 
-- One-click conversion of entire O'Reilly books to EPUB 3.0
-- Quality report after every download — missing chapters, failed images, and stylesheet problems are counted and listed in the popup instead of silently degrading, with a one-click re-download
-- Built-in integrity check before packaging (OPF ↔ ZIP ↔ spine reconciliation) — structurally broken EPUBs are blocked instead of delivered
+- **One-click conversion** of entire O'Reilly books to EPUB 3.0
+- **Works on library EZproxy portals**, not just personal subscriptions — the full pipeline (chapters, images, cover, metadata) runs against your library's proxy origin
+- **Quality report after every download** — missing chapters, failed images, and stylesheet problems are counted and listed in the popup instead of silently degrading, with a one-click re-download
+- **Built-in integrity check before packaging** (OPF ↔ ZIP ↔ spine reconciliation) — structurally broken EPUBs are blocked instead of delivered
+- Handles both classic XHTML books and O'Reilly's **newer HTML-fragment format** (`epub:type` structural semantics are preserved and properly namespaced)
 - System notifications on completion and failure (clicking one jumps back to the book's tab)
 - Rich book metadata (language, publisher, subjects, description, publication date) for Calibre and e-reader libraries
 - Cover always included: filename detection with an automatic API fallback for books without a conventionally named cover image
@@ -20,7 +36,7 @@ A Chrome extension that converts O'Reilly Learning books into EPUB format with a
 ## Prerequisites
 
 - Google Chrome (or Chromium-based browser)
-- Access to [O'Reilly Learning](https://learning.oreilly.com), either through a personal subscription or a library that provides it (see [Library access](#library-access))
+- Access to [O'Reilly Learning](https://learning.oreilly.com) — a personal subscription **or** a library that provides it (see [Library access](#library-access))
 
 ## Installation
 
@@ -34,15 +50,15 @@ A Chrome extension that converts O'Reilly Learning books into EPUB format with a
 
 ## Usage
 
-1. Navigate to any book page on `learning.oreilly.com`
+1. Open any book — on `learning.oreilly.com`, or through your library's O'Reilly portal
 2. Click the extension icon — the popup will display the detected book title and author(s)
 3. Click **Download EPUB**
 4. The extension fetches all chapters, images, and stylesheets, then packages them into an EPUB file
-5. The EPUB file downloads automatically when complete
+5. The EPUB file downloads automatically when complete, followed by a per-book quality report
 
 ## Library access
 
-Many public and university libraries provide O'Reilly Learning through an [EZproxy](https://help.oclc.org/Library_Management/EZproxy) gateway, which serves the same content from a rewritten hostname — `learning.oreilly.com` becomes `learning-oreilly-com.<proxy-host>`. The extension supports this.
+Many public and university libraries provide O'Reilly Learning through an [EZproxy](https://help.oclc.org/Library_Management/EZproxy) gateway, which serves the same content from a rewritten hostname — `learning.oreilly.com` becomes `learning-oreilly-com.<proxy-host>`. The extension supports this natively.
 
 **Out of the box:** Seattle Public Library (`learning-oreilly-com.ezproxy.spl.org`).
 
@@ -80,10 +96,11 @@ The personal-use disclaimer below applies to library access too. Check your libr
 
 ## How It Works
 
-- **Content script** runs on `learning.oreilly.com`, fetching book content via same-origin API calls (session cookies are included automatically)
+- **Content script** runs on `learning.oreilly.com` and the declared library-proxy hosts, fetching book content via same-origin API calls (session cookies — O'Reilly's or your library's — are included automatically)
 - **Book metadata** (title, authors, language, publisher, subjects, description, publication date, cover URL) is retrieved from the O'Reilly search API (`/api/v2/search/`) and normalized before entering the EPUB
 - **File manifest** is fetched from `/api/v2/epubs/` with pagination support
-- **Service worker** relays progress messages, updates the extension badge, and proxies cover/CDN image fetches behind an O'Reilly host allowlist
+- **Session expiry** is detected in both modes — including EZproxy's login redirect, which is invisible to a naive fetch — and reported with mode-specific recovery guidance
+- **Service worker** relays progress messages, updates the extension badge, and proxies cover/CDN image fetches behind a host allowlist covering both origins
 - **JSZip** packages everything into a valid EPUB 3.0 file
 
 ## Project Structure
@@ -99,8 +116,8 @@ oreilly-epub-extension/
 │   ├── path-utils.js      # Pure helpers: path resolution, filename sanitizing, host allowlist
 │   ├── epub-builder.js    # EPUB structure generation (OPF, NCX, TOC) + metadata normalization
 │   ├── epub-validator.js  # Pre-package integrity gate (manifest/ZIP/spine reconciliation)
-│   ├── fetcher.js         # HTTP fetching with retry, backoff, rate limit handling
-│   └── eink-optimizer.js  # E-ink code block optimization
+│   ├── fetcher.js         # HTTP fetching with retry, backoff, session-expiry detection
+│   └── eink-optimizer.js  # E-ink optimization + XHTML namespace repair
 ├── styles/
 │   └── eink-override.css  # E-ink display overrides injected into EPUB
 ├── icons/                 # Extension icons
@@ -117,7 +134,7 @@ python -m http.server 8765
 # → http://localhost:8765/oreilly-epub-extension/tests/test-runner.html
 ```
 
-The suite covers pure helpers, the download lifecycle (via a chrome API mock), and an integration pass that unpacks generated EPUBs to audit OPF/ZIP consistency.
+The suite covers pure helpers, the download lifecycle (via a chrome API mock), and an integration pass that unpacks generated EPUBs to audit OPF/ZIP consistency — including fixtures that run the full pipeline against a simulated library-proxy origin.
 
 ## Design
 
@@ -125,4 +142,4 @@ See the full design spec at [`docs/superpowers/specs/2026-03-15-oreilly-epub-chr
 
 ## Disclaimer
 
-This extension requires an active O'Reilly Learning subscription. Downloaded EPUB files are **strictly for personal use only** — they must not be redistributed, shared, or used for any commercial purpose. Users are responsible for complying with O'Reilly's [Terms of Service](https://www.oreilly.com/terms/) and applicable copyright laws. This project is not affiliated with or endorsed by O'Reilly Media.
+This extension requires legitimate access to O'Reilly Learning — a personal subscription or a library that provides it. Downloaded EPUB files are **strictly for personal use only** — they must not be redistributed, shared, or used for any commercial purpose. Users are responsible for complying with O'Reilly's [Terms of Service](https://www.oreilly.com/terms/), your library's terms of use, and applicable copyright laws. This project is not affiliated with or endorsed by O'Reilly Media.

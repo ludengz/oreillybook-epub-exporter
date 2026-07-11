@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "O'Reilly EPUB Exporter",
-  "version": "1.1.0",
-  "description": "One-click O'Reilly book to EPUB conversion for e-ink readers",
+  "version": "1.2.0",
+  "description": "One-click O'Reilly book to EPUB conversion for e-ink readers — works with personal subscriptions and library access",
   "permissions": ["activeTab", "notifications", "storage"],
   "host_permissions": [
     "https://learning.oreilly.com/*",
