@@ -1,6 +1,6 @@
 const Fetcher = {
   extractIsbn(url) {
-    const match = url.match(/\/library\/(?:view|cover)\/(?:[^/]+\/)?(\d{13})/);
+    const match = url.match(/\/library\/(?:view|cover)\/(?:[^/]+\/)?(\d{10,13})/);
     return match ? match[1] : null;
   },
 
