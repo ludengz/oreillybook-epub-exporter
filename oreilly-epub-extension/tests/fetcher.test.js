@@ -10,6 +10,43 @@ describe('Fetcher.extractIsbn', function() {
   it('returns null for non-matching URL', function() {
     assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/playlists/something'), null);
   });
+
+  // Older titles are indexed by their ISBN-10 on the platform: the epubs API
+  // lists files for urn:orm:book:0596007124 but nothing for the ISBN-13
+  // equivalent, so the 10-character ID must be returned as-is (no conversion).
+  it('extracts a 10-digit ID from an older book URL', function() {
+    const isbn = Fetcher.extractIsbn('https://learning.oreilly.com/library/view/head-first-design/0596007124/');
+    assertEqual(isbn, '0596007124');
+  });
+  it('extracts a 10-digit ID from a chapter URL', function() {
+    const isbn = Fetcher.extractIsbn('https://learning.oreilly.com/library/view/head-first-design/0596007124/ch01.html');
+    assertEqual(isbn, '0596007124');
+  });
+  it('extracts a 10-digit ID from a cover URL', function() {
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/cover/0596007124/'), '0596007124');
+  });
+  it('extracts a 10-digit ID on the library proxy host', function() {
+    const isbn = Fetcher.extractIsbn('https://learning-oreilly-com.ezproxy.spl.org/library/view/head-first-design/0596007124/');
+    assertEqual(isbn, '0596007124');
+  });
+  it('extracts an ISBN-10 whose check digit is X', function() {
+    const isbn = Fetcher.extractIsbn('https://learning.oreilly.com/library/view/head-first-html/059610197X/ch01.html');
+    assertEqual(isbn, '059610197X');
+  });
+  it('rejects a lowercase x check digit (platform IDs are case-sensitive)', function() {
+    // urn:orm:book:059610197x lists zero files; only the uppercase form resolves.
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/view/head-first-html/059610197x/'), null);
+  });
+  it('rejects 11- and 12-digit segments', function() {
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/view/slug/12345678901/'), null);
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/view/slug/123456789012/'), null);
+  });
+  it('does not truncate a longer digit run into a 13-digit ID', function() {
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/view/slug/97818362000791/'), null);
+  });
+  it('extracts a 13-digit ID without a trailing slash', function() {
+    assertEqual(Fetcher.extractIsbn('https://learning.oreilly.com/library/cover/9781836200079'), '9781836200079');
+  });
 });
 
 describe('Fetcher.throttledFetchAll', function() {
