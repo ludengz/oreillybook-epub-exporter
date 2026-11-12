@@ -32,6 +32,8 @@ Chrome extension (Manifest V3) that converts O'Reilly Learning books to EPUB 3.0
 
 - No build step — load unpacked in `chrome://extensions/`
 - Start test server: `python -m http.server 8765`
+- Headless tests (CI): `node .github/scripts/run-browser-tests.mjs` after `npm install --no-save playwright@1.64.1`
+- Release: bump `manifest.json` version, merge to `master`, push tag `vX.Y.Z`; `.github/workflows/release.yml` tests, packages, and publishes the GitHub Release
 
 ## Review guidelines
 
