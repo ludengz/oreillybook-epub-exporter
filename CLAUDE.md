@@ -19,6 +19,12 @@ The test framework is a minimal custom implementation (`describe`/`it`/`assert`)
 
 `tests/popup-preview.html` is a fixture-driven harness that renders the real `popup.js` against mock states (`?scenario=clean|issues|validation-error|error|ready`) for visual verification without loading the extension.
 
+Headless run (what CI uses): `npm install --no-save playwright@1.64.1 && node .github/scripts/run-browser-tests.mjs` (set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Chrome instead of downloading Chromium). Besides failed tests, it fails on any same-origin 404 or uncaught page error, because the in-page runner silently drops a suite whose test file fails to load and still reports "N passed, 0 failed".
+
+## Releasing
+
+Bump `version` in `oreilly-epub-extension/manifest.json`, merge to `master`, then push a matching tag (`git tag vX.Y.Z && git push origin vX.Y.Z`). `.github/workflows/release.yml` checks that the tag matches the manifest version and is on `master`, runs the headless browser suite, builds `oreilly-epub-exporter-X.Y.Z.zip` with `git archive` (tracked files under `oreilly-epub-extension/` only), and publishes a GitHub Release with auto-generated notes; edit the title/notes afterwards if needed. The same verify job runs on pull requests and manual dispatch without publishing.
+
 ## Loading the Extension
 
 1. Open `chrome://extensions/` with Developer mode enabled

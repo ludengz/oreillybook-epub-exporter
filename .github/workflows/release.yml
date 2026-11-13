@@ -1,0 +1,94 @@
+name: Release
+
+# Pushing a vX.Y.Z tag (matching manifest.json "version", on master) runs the
+# browser test suite headlessly, packages the extension with git archive, and
+# publishes a GitHub Release with the zip attached. Pull requests and manual
+# runs execute the same verify job without publishing.
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(node -p "require('./oreilly-epub-extension/manifest.json').version")
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME must equal v<manifest.json version> (manifest has $version)"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "::error::Release commit must be on master"
+            exit 1
+          fi
+
+      - name: Install Playwright Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund --ignore-scripts playwright@1.64.1
+          npx playwright install --with-deps --only-shell chromium
+
+      - name: Run browser test suite
+        run: node .github/scripts/run-browser-tests.mjs
+
+      - name: Build extension zip
+        run: |
+          version=$(node -p "require('./oreilly-epub-extension/manifest.json').version")
+          zip="$RUNNER_TEMP/release/oreilly-epub-exporter-$version.zip"
+          mkdir -p "$RUNNER_TEMP/release"
+          git archive --format=zip -o "$zip" HEAD oreilly-epub-extension
+          unzip -l "$zip" | grep -q ' oreilly-epub-extension/manifest.json$'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-package
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: release-package
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-package/*.zip --clobber
+          else
+            gh release create "$RELEASE_TAG" release-package/*.zip --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
