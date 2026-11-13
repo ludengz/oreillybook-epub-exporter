@@ -1,6 +1,10 @@
 const Fetcher = {
+  // Platform book IDs are ISBN-13 for newer titles and ISBN-10 for older ones
+  // (the API only resolves older titles by their 10-character ID). An ISBN-10
+  // check digit may be an uppercase X; the platform treats IDs case-sensitively.
+  // (?!\d) keeps an 11+ digit run from being truncated into a valid-looking ID.
   extractIsbn(url) {
-    const match = url.match(/\/library\/(?:view|cover)\/(?:[^/]+\/)?(\d{10,13})/);
+    const match = url.match(/\/library\/(?:view|cover)\/(?:[^/]+\/)?(\d{13}|\d{9}[\dX])(?!\d)/);
     return match ? match[1] : null;
   },
 
